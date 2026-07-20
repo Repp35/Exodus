@@ -1,4 +1,4 @@
---[[ AutoClash ]]
+--[[ AutoClash v2 — Deativação Perfeita ]]
 
 local AutoClash = {}
 local _Probe, GameInfo, Utils, AutoParry
@@ -58,7 +58,6 @@ local CLASH = {
         COLD_PING_SCALE          = 0.4,
         FAST_PING_SCALE          = 0.5,
         PREEMPT_PING_SCALE       = 0.4,
-        MAINT_CHECK_INTERVAL     = 0.040,
         MAINT_HOLD_MIN           = 0.080,
         MAINT_BALL_RADIUS        = 25,
         MAINT_TIMP_MAX           = 0.40,
@@ -89,10 +88,10 @@ local CLASH = {
         FULL_PLAYER_SCAN_INTERVAL = 1.0,
         PLAYER_SCAN_RADIUS       = 100,
         DANGER_EMA_ALPHA         = 0.15,
-        
-        -- Novos tunnings para a Desativação Precisa
-        DEACT_BOUNCE_DIST_MARGIN = 6.0,   -- Margem aceitável fora do raio durante quiques rápidos
-        DEACT_BOUNCE_SPD_THRESH  = 30,    -- Velocidade mínima pra considerar um "quique" e não soltar
+        -- Bounce rule (desativacao perfeita)
+        BOUNCE_CPS_THRESH        = 6,
+        BOUNCE_REENTRY_FACTOR    = 1.6,
+        BOUNCE_DOT_FLEE          = -0.3,
 }
 
 -- P
@@ -134,7 +133,6 @@ local S = {
         burstOffStart        = 0,
         burstSignalDuringOn  = false,
         dashAnti             = { untilT = 0, src = nil, at = 0 },
-        lastMaintCheck       = 0,
         lastFireAt           = 0,
 }
 
@@ -179,8 +177,7 @@ local function tImpCapFor(spd, base, refSpd, lo, hi)
         return math.clamp(base * s, lo, hi)
 end
 
--- maintTimpMax / deactTimpMax
-local function maintTimpMax(spd) return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.06, 0.40) end
+-- deactTimpMax
 local function deactTimpMax(spd) return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.08, 0.40) end
 
 -- isTargeted
@@ -294,13 +291,34 @@ function AutoClash.invalidateSnapshot()
         _ctxCache.valid = false
 end
 
--- maintRadius
+-- maintRadius: raio DINAMICO de defesa (espelha a ativacao)
 local function maintRadius(spd)
         local base = math.max(
                 P.DEFLECT_R + GameInfo.preBufferStuds(spd) + (AutoParry and AutoParry.resRadiusBonus() or 0),
                 CLASH.MAINT_BALL_RADIUS
         )
         return math.min(base, 55)
+end
+
+-- shouldKeepClashAlive: decide se a bola que saiu do raio vai voltar
+-- Fonte unica: tickReturnDetector. Se EXITED dentro da janela de retorno,
+-- eh bounce real. CPS alto = oponente em clash rapido.
+local function shouldKeepClashAlive(ctx, t)
+        -- Bounce confirmado pelo detector: EXITED dentro da janela
+        if S.detPhase == "EXITED" then
+                local timeSinceExit = t - S.detExitAt
+                local returnWindow  = S.detEntryTime * CLASH.DET_RETURN_FACTOR
+                if timeSinceExit <= returnWindow then
+                        return true
+                end
+        end
+
+        -- Oponente em clash rapido (CPS alto): segura
+        if S.targetCps >= CLASH.BOUNCE_CPS_THRESH then
+                return true
+        end
+
+        return false
 end
 
 -- isBallApproaching
@@ -312,64 +330,42 @@ local function isBallApproaching(hrp, ball)
         return av:Dot(toMe.Unit) > 0.25
 end
 
--- shouldDeactivateClash (NOVA LÓGICA PRECISA)
--- Desativar é a ausência das condições de ativar.
--- Regra de Ouro: Só mantenho se estiver dentro do Raio Dinâmico E vindo pra mim.
--- Regra do Quique: Se saiu do Raio, mas está rápido e perto (clash de alto CPS), seguro. Se tá lento, corto.
+-- shouldDeactivateClash: DESATIVACAO PERFEITA
+-- - Usa maintRadius(spd) dinamico (espelha ativacao)
+-- - Respeita bounce (CPS alto ou bola rapida+perta)
+-- - Respeita detSignal (reativacao instantanea)
+-- - Sem grace, sem delay, sem 22 studs fixo
 local function shouldDeactivateClash()
         if not S.clashOn then return false end
         local t = _now()
+        local ctx = clashSnapshot()
+        if not ctx then return true end  -- morreu/sumiu = sempre corta
 
-        -- Hold mínimo: nunca corta logo após ativar (evita flicker)
-        if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
-
-        -- Teto duro de duração
+        -- Tetos duros
+        if (t - S.clashAt) < CLASH.MIN_HOLD then return false end
         if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
 
-        -- Fatais: morreu / bola sumiu / HRP sumiu
-        local lp = Utils.getLocalPlayer()
-        local myChar = lp and lp.Character
-        if not (myChar and myChar.Parent) then return true end
-        local myHum = myChar:FindFirstChildOfClass("Humanoid")
-        if not (myHum and myHum.Parent and myHum.Health > 0) then return true end
-        local ball = GameInfo.getBall()
-        if not (ball and ball.Parent) then return true end
-        local hr = myChar:FindFirstChild("HumanoidRootPart")
-        if not (hr and hr.Parent) then return true end
+        -- Detector mandou sinal de reentrada: NAO corta
+        if S.detSignal then return false end
 
-        local ctx = clashSnapshot()
-        if not ctx then return true end
-
-        -- Bola escapou de vez do mapa
+        -- Bola foi-se de vez
         if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return true end
 
-        -- === A REGRA DE OURO ===
-        -- Calcula o raio exato de parry dinâmico neste frame
-        local dynamicRadius = maintRadius(ctx.spd)
-        local insideDynamicRadius = ctx.bDist <= dynamicRadius
-        local approaching = isBallApproaching(hr, ctx.ball)
+        -- Bola morta (parou / tImp explodiu)
+        if ctx.tImp > deactTimpMax(ctx.spd) then return true end
+        if ctx.spd < 1 and ctx.bDist > 20 then return true end
 
-        -- Se está dentro do raio E vindo pra mim, NÃO desativa. Simples assim.
-        if insideDynamicRadius and approaching then
-                return false
+        -- Regra principal: raio DINAMICO
+        local rad = maintRadius(ctx.spd)
+        if ctx.bDist > rad then
+                -- Fora do raio: bounce (detector) ou morte?
+                if shouldKeepClashAlive(ctx, t) then
+                        return false  -- segura, bounce real
+                end
+                return true  -- corta
         end
 
-        -- === A REGRA DO QUIQUE (Antídoto para desativar cedo demais) ===
-        -- Se chegou aqui, a bola saiu do raio ou parou de vir. 
-        -- Mas será que é um quique de clash rápido? (Bola a 0.1 studs do raio, mas com velocidade alta de retorno)
-        local ok, av = pcall(function() return ctx.ball.AssemblyLinearVelocity end)
-        local spd = (ok and typeof(av) == "Vector3") and av.Magnitude or 0
-        
-        local isBouncingFast = spd > CLASH.DEACT_BOUNCE_SPD_THRESH
-        local isNearMiss = ctx.bDist <= (dynamicRadius + CLASH.DEACT_BOUNCE_DIST_MARGIN)
-
-        -- Se a bola está rápida, perto do raio, e o CPS do clash é alto, confio no quique e NÃO desativo ainda.
-        if isBouncingFast and isNearMiss and S.targetCps >= CLASH.CPS_THRESH then
-                return false
-        end
-
-        -- Qualquer outro caso (bola lenta do iniciante, bola foi pra longe, bola parou): DESATIVA IMEDIATAMENTE.
-        return true
+        return false
 end
 
 -- activateBurst
@@ -384,7 +380,6 @@ local function activateBurst(t, Config)
         S.clashOffAt          = 0
         S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, false
         S.tImpRiseHist        = { 0, 0, 0 }
-        S.lastMaintCheck      = t
         local c = math.max(tonumber(Config.CPS) or Utils.defaultCps(), 1)
         _spamDebt  = (1 / c) * CLASH.SPAM_PRE_FILL_FRAMES
         _burstActiveShared = false
@@ -435,7 +430,7 @@ local function onTeleport()
         clearClash()
 end
 
--- evaluateClash
+-- evaluateClash: roda TODO frame, sem MAINT_CHECK_INTERVAL
 local function evaluateClash(t, hr, ball, Config)
         if Config.AutoClash == false or _G.PhantomManual then
                 if S.clashOn then
@@ -449,7 +444,7 @@ local function evaluateClash(t, hr, ball, Config)
         -- Detector roda SEMPRE, inclusive quando clashOn
         tickReturnDetector(t, hr, ball)
 
-        -- DESATIVAÇÃO FRAME-PERFECT: Checa todo frame, zero throttle.
+        -- Desativacao perfeita: roda todo frame, sem delay
         if S.clashOn and shouldDeactivateClash() then
                 clearClash()
                 S.burstState          = "IDLE"
@@ -457,9 +452,8 @@ local function evaluateClash(t, hr, ball, Config)
                 return
         end
 
-        -- Se clash está on, só o burst renova o hold
+        -- Se clash esta on, burst renova o hold
         if S.clashOn then
-                -- Burst em ON: renova se houver sinal
                 if S.burstState == "ON" then
                         if S.detSignal then
                                 S.burstSignalDuringOn = true
@@ -473,7 +467,7 @@ local function evaluateClash(t, hr, ball, Config)
                 return
         end
 
-        -- Clash não está on: máquina de burst normal
+        -- Clash nao esta on: maquina de burst normal
         local antiDashActive = S.dashAnti.untilT > t
         local canFire = (S.detSignal and isTargeted()) or antiDashActive
 
@@ -624,7 +618,7 @@ local function reportDash(player)
         _antidashCooldown[player.UserId] = t
         local ch = player.Character
         if not (ch and ch.Parent) then return end
-        local php = ch:FindFirstChild("HumanoidRootPart")
+        local php = ch and ch:FindFirstChild("HumanoidRootPart")
         local lp = Utils.getLocalPlayer()
         local myChar = lp and lp.Character
         local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
@@ -662,7 +656,7 @@ local function _hookPlayerAntiDash(player)
                                 for _, tr in ipairs(anim:GetPlayingAnimationTracks()) do
                                         local n  = (tr.Name or ""):lower()
                                         local an = tr.Animation and tr.Animation.Name or ""
-                                        if n:find("dash") or an:lower().find("dash") then
+                                        if n:find("dash") or an:lower():find("dash") then
                                                 reportDash(player)
                                                 break
                                         end
@@ -674,7 +668,7 @@ local function _hookPlayerAntiDash(player)
                                 if not track or not track.Animation then return end
                                 local n  = (track.Name or ""):lower()
                                 local an = track.Animation.Name or ""
-                                if n:find("dash") or an:lower().find("dash") then
+                                if n:find("dash") or an:lower():find("dash") then
                                         reportDash(player)
                                 end
                         end)
@@ -725,9 +719,6 @@ function AutoClash.evaluate(t, hr, ball, Config)
         evaluateClash(t, hr, ball, Config)
 end
 
--- tickMaintenance removido. Tudo roda no evaluateClash agora.
-function AutoClash.tickMaintenance() end 
-
 function AutoClash.updateDashTrack(t)     updateDashTrack(t, Utils.getPlayers()) end
 function AutoClash.installAntiDashHooks() installAntiDashHooks(Utils.getPlayers()) end
 function AutoClash.getState()             return S end
@@ -740,7 +731,7 @@ function AutoClash.resetState()
         S.clashOn, S.clashAt, S.clashHoldUntil, S.clashOffAt, S.lastClashReact = false, 0, 0, 0, 0
         S.dangerEma, S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, 0, false
         S.tImpRiseHist = { 0, 0, 0 }
-        S.targetRingIdx, S.targetCps, S.lastMaintCheck = 0, 0, 0
+        S.targetRingIdx, S.targetCps = 0, 0
         S.lastFireAt = 0
         for i = 1, RING_BUF do
                 S.targetRing[i] = 0
@@ -754,7 +745,10 @@ function AutoClash.resetState()
         _ctxCache.valid = false
 end
 
--- notifyFired / setBurstActive / getBurstActive / setBurstSink
+-- notifyFired
+-- setBurstActive
+-- getBurstActive
+-- setBurstSink
 function AutoClash.notifyFired(t)
         S.lastFireAt = t
 end
