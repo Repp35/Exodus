@@ -1,8 +1,6 @@
 --[[ AutoClash ]]
 
 local AutoClash = {}
-
--- deps
 local _Probe, GameInfo, Utils, AutoParry
 
 -- tunning
