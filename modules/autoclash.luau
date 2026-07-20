@@ -388,12 +388,15 @@ end
 
 -- onTarget
 local function onTarget(newTarget, t)
+	if type(newTarget) ~= "number" then
+		return
+	end
 	local previousTarget = S.lastTarget
 	S.lastTarget, S.lastTargetAt = newTarget, t
 	ringPush(t)
 	local ap = AutoParry.getState()
 	ap.armed = newTarget == _localUserId
-	ap.fired = false
+	-- (v22.1: AP.fired é resetado pelo onBallSync na borda de target, não aqui)
 	local Config = _G.PhantomConfig
 	local targeted = newTarget == _localUserId
 	if targeted and Config and Config.AutoClash ~= false and not _G.PhantomManual
