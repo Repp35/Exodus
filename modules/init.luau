@@ -3,12 +3,12 @@
 -- CONFIG
 local CONFIG = {
     ModuleURLs = {
-        Utils = "",
-        GameInfo = "",
-        Probe = "",
-        AutoParry = "",
-        AutoClash = "",
-        Spam = "",
+        Utils = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/Utils.luau",
+        GameInfo = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/GameInfo.luau",
+        Probe = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/Probe.luau",
+        AutoParry = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/AutoParry.luau",
+        AutoClash = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/AutoClash.luau",
+        Spam = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/Spam.luau",
         GUI = "https://raw.githubusercontent.com/Repp35/Roblox/refs/heads/main/phantom_gui.lua"
     },
     AutoParry = true,
