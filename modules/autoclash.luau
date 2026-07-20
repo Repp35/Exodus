@@ -1,4 +1,4 @@
---[[ AutoClash v2 — Deativação Perfeita ]]
+--[[ AutoClash v3 — Deativacao Perfeita (snapshot original mantido) ]]
 
 local AutoClash = {}
 local _Probe, GameInfo, Utils, AutoParry
@@ -58,6 +58,7 @@ local CLASH = {
         COLD_PING_SCALE          = 0.4,
         FAST_PING_SCALE          = 0.5,
         PREEMPT_PING_SCALE       = 0.4,
+        MAINT_CHECK_INTERVAL     = 0.040,
         MAINT_HOLD_MIN           = 0.080,
         MAINT_BALL_RADIUS        = 25,
         MAINT_TIMP_MAX           = 0.40,
@@ -88,10 +89,8 @@ local CLASH = {
         FULL_PLAYER_SCAN_INTERVAL = 1.0,
         PLAYER_SCAN_RADIUS       = 100,
         DANGER_EMA_ALPHA         = 0.15,
-        -- Bounce rule (desativacao perfeita)
+        -- Bounce rule (usa o proprio detector)
         BOUNCE_CPS_THRESH        = 6,
-        BOUNCE_REENTRY_FACTOR    = 1.6,
-        BOUNCE_DOT_FLEE          = -0.3,
 }
 
 -- P
@@ -133,6 +132,7 @@ local S = {
         burstOffStart        = 0,
         burstSignalDuringOn  = false,
         dashAnti             = { untilT = 0, src = nil, at = 0 },
+        lastMaintCheck       = 0,
         lastFireAt           = 0,
 }
 
@@ -177,7 +177,9 @@ local function tImpCapFor(spd, base, refSpd, lo, hi)
         return math.clamp(base * s, lo, hi)
 end
 
+-- maintTimpMax
 -- deactTimpMax
+local function maintTimpMax(spd) return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.06, 0.40) end
 local function deactTimpMax(spd) return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.08, 0.40) end
 
 -- isTargeted
@@ -250,7 +252,7 @@ local function tickReturnDetector(t, hr, ball)
         S.detWasInside = isInside
 end
 
--- clashSnapshot
+-- clashSnapshot (ORIGINAL — funcionava)
 local function clashSnapshot()
         local t = _now()
         if _ctxCache.valid and (t - _ctxCache.t) < CLASH_SNAPSHOT_TTL then
@@ -273,11 +275,8 @@ local function clashSnapshot()
         local bDist = (hr.Position - bp).Magnitude
         local panic = nearestAlive and (nearest <= CLASH.PANIC_DIST and bDist <= CLASH.PANIC_BALL)
         local live = GameInfo.liveTImp()
-        local tImp, spd
-        if live and typeof(live) == "table" then
-                tImp, spd = live.tImp, live.spd
-        end
-        if not spd or spd < 1 then
+        local tImp, spd = live.tImp, live.spd
+        if spd < 1 then
                 local ti, _, s2 = GameInfo.computeTImp(hr, ball, t)
                 tImp, spd = ti, s2
         end
@@ -294,7 +293,7 @@ function AutoClash.invalidateSnapshot()
         _ctxCache.valid = false
 end
 
--- maintRadius: raio DINAMICO de defesa (espelha a ativacao)
+-- maintRadius
 local function maintRadius(spd)
         local base = math.max(
                 P.DEFLECT_R + GameInfo.preBufferStuds(spd) + (AutoParry and AutoParry.resRadiusBonus() or 0),
@@ -303,11 +302,8 @@ local function maintRadius(spd)
         return math.min(base, 55)
 end
 
--- shouldKeepClashAlive: decide se a bola que saiu do raio vai voltar
--- Fonte unica: tickReturnDetector. Se EXITED dentro da janela de retorno,
--- eh bounce real. CPS alto = oponente em clash rapido.
+-- shouldKeepClashAlive: detector + CPS alto
 local function shouldKeepClashAlive(ctx, t)
-        -- Bounce confirmado pelo detector: EXITED dentro da janela
         if S.detPhase == "EXITED" then
                 local timeSinceExit = t - S.detExitAt
                 local returnWindow  = S.detEntryTime * CLASH.DET_RETURN_FACTOR
@@ -315,13 +311,74 @@ local function shouldKeepClashAlive(ctx, t)
                         return true
                 end
         end
-
-        -- Oponente em clash rapido (CPS alto): segura
         if S.targetCps >= CLASH.BOUNCE_CPS_THRESH then
                 return true
         end
+        return false
+end
+
+-- shouldMaintainClash (ORIGINAL — funcionava, com bounce adicionado)
+local function shouldMaintainClash()
+        if not S.clashOn then return false end
+        local t = _now()
+
+        -- Hold minimo: nunca corta logo apos ativar
+        if (t - S.clashAt) < CLASH.MAINT_HOLD_MIN then return true end
+
+        -- Teto duro de duracao
+        if (t - S.clashAt) > CLASH.MAX_HOLD then return false end
+
+        -- Fatais: morreu / bola sumiu / HRP sumiu
+        local lp = Utils.getLocalPlayer()
+        local myChar = lp and lp.Character
+        if not (myChar and myChar.Parent) then return false end
+        local myHum = myChar:FindFirstChildOfClass("Humanoid")
+        if not (myHum and myHum.Parent and myHum.Health > 0) then return false end
+        local ball = GameInfo.getBall()
+        if not (ball and ball.Parent) then return false end
+        local hr = myChar:FindFirstChild("HumanoidRootPart")
+        if not (hr and hr.Parent) then return false end
+
+        -- Se a bola ainda ta dentro do range de ativacao, spama
+        local ctx = clashSnapshot()
+        if ctx and ctx.bDist <= CLASH.BALL_HARD_CAP then
+                return true
+        end
+
+        -- Sem leitura de contexto: mantem por inercia
+        if not ctx then return true end
+
+        -- Bola escapou de vez
+        if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return false end
+
+        -- Regra nova: raio DINAMICO (substitui o deactRad fixo antigo)
+        local rad = maintRadius(ctx.spd)
+        if ctx.bDist > rad then
+                if ctx and shouldKeepClashAlive(ctx, t) then
+                        return true
+                end
+                return false
+        end
+
+        -- Bola fora do range duro mas ainda no "stop radius" + alvo
+        if ctx.bDist <= CLASH.MAINT_STOP_RADIUS then
+                if isTargeted() then return true end
+                if (t - S.lastFireAt) < CLASH.MAINT_PARRY_KEEP then return true end
+                if (t - S.lastTargetAt) < CLASH.MAINT_TARGET_KEEP then return true end
+        end
 
         return false
+end
+
+-- tickMaintenance (ORIGINAL — funcionava)
+local function tickMaintenance()
+        if not S.clashOn then return end
+        local t = _now()
+        if (t - S.lastMaintCheck) < CLASH.MAINT_CHECK_INTERVAL then return end
+        S.lastMaintCheck = t
+        if not shouldMaintainClash() then
+                clearClash()
+        end
 end
 
 -- isBallApproaching
@@ -333,41 +390,30 @@ local function isBallApproaching(hrp, ball)
         return av:Dot(toMe.Unit) > 0.25
 end
 
--- shouldDeactivateClash: DESATIVACAO PERFEITA
--- - Usa maintRadius(spd) dinamico (espelha ativacao)
--- - Respeita bounce (CPS alto ou bola rapida+perta)
--- - Respeita detSignal (reativacao instantanea)
--- - Sem grace, sem delay, sem 22 studs fixo
+-- shouldDeactivateClash (ORIGINAL — funcionava)
 local function shouldDeactivateClash()
         if not S.clashOn then return false end
         local t = _now()
-        local ctx = clashSnapshot()
-        if not ctx then return true end  -- morreu/sumiu = sempre corta
-
-        -- Tetos duros
-        if (t - S.clashAt) < CLASH.MIN_HOLD then return false end
+        if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
         if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
-
-        -- Detector mandou sinal de reentrada: NAO corta
-        if S.detSignal then return false end
-
-        -- Bola foi-se de vez
+        local lp = Utils.getLocalPlayer()
+        local myChar = lp.Character
+        if not (myChar and myChar.Parent) then return true end
+        local myHum = myChar:FindFirstChildOfClass("Humanoid")
+        if not (myHum and myHum.Parent and myHum.Health > 0) then return true end
+        local ball = GameInfo.getBall()
+        if not (ball and ball.Parent) then return true end
+        local ctx = clashSnapshot()
+        if not ctx then return true end
         if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return true end
-
-        -- Bola morta (parou / tImp explodiu)
+        local deactRad = math.clamp(P.DEFLECT_R + P.RAD_FLOOR, 18, 30)
+        if ctx.bDist > deactRad then return true end
         if ctx.tImp > deactTimpMax(ctx.spd) then return true end
-        if ctx.spd < 1 and ctx.bDist > 20 then return true end
-
-        -- Regra principal: raio DINAMICO
-        local rad = maintRadius(ctx.spd)
-        if ctx.bDist > rad then
-                -- Fora do raio: bounce (detector) ou morte?
-                if shouldKeepClashAlive(ctx, t) then
-                        return false  -- segura, bounce real
-                end
-                return true  -- corta
+        local hr = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
+                if not isBallApproaching(hr, ctx.ball) and ctx.bDist > 15 then return true end
         end
-
+        if ctx.spd < 1 and ctx.bDist > 20 then return true end
         return false
 end
 
@@ -383,6 +429,7 @@ local function activateBurst(t, Config)
         S.clashOffAt          = 0
         S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, false
         S.tImpRiseHist        = { 0, 0, 0 }
+        S.lastMaintCheck      = t
         local c = math.max(tonumber(Config.CPS) or Utils.defaultCps(), 1)
         _spamDebt  = (1 / c) * CLASH.SPAM_PRE_FILL_FRAMES
         _burstActiveShared = false
@@ -433,7 +480,7 @@ local function onTeleport()
         clearClash()
 end
 
--- evaluateClash: roda TODO frame, sem MAINT_CHECK_INTERVAL
+-- evaluateClash (ORIGINAL — funcionava)
 local function evaluateClash(t, hr, ball, Config)
         if Config.AutoClash == false or _G.PhantomManual then
                 if S.clashOn then
@@ -444,10 +491,10 @@ local function evaluateClash(t, hr, ball, Config)
                 return
         end
 
-        -- Detector roda SEMPRE, inclusive quando clashOn
+        -- Detector roda SEMPRE
         tickReturnDetector(t, hr, ball)
 
-        -- Desativacao perfeita: roda todo frame, sem delay
+        -- Desativacao por condicoes extremas
         if S.clashOn and shouldDeactivateClash() then
                 clearClash()
                 S.burstState          = "IDLE"
@@ -455,7 +502,6 @@ local function evaluateClash(t, hr, ball, Config)
                 return
         end
 
-        -- Se clash esta on, burst renova o hold
         if S.clashOn then
                 if S.burstState == "ON" then
                         if S.detSignal then
@@ -470,7 +516,6 @@ local function evaluateClash(t, hr, ball, Config)
                 return
         end
 
-        -- Clash nao esta on: maquina de burst normal
         local antiDashActive = S.dashAnti.untilT > t
         local canFire = (S.detSignal and isTargeted()) or antiDashActive
 
@@ -621,7 +666,7 @@ local function reportDash(player)
         _antidashCooldown[player.UserId] = t
         local ch = player.Character
         if not (ch and ch.Parent) then return end
-        local php = ch and ch:FindFirstChild("HumanoidRootPart")
+        local php = ch:FindFirstChild("HumanoidRootPart")
         local lp = Utils.getLocalPlayer()
         local myChar = lp and lp.Character
         local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
@@ -722,6 +767,7 @@ function AutoClash.evaluate(t, hr, ball, Config)
         evaluateClash(t, hr, ball, Config)
 end
 
+function AutoClash.tickMaintenance()      tickMaintenance() end
 function AutoClash.updateDashTrack(t)     updateDashTrack(t, Utils.getPlayers()) end
 function AutoClash.installAntiDashHooks() installAntiDashHooks(Utils.getPlayers()) end
 function AutoClash.getState()             return S end
@@ -734,7 +780,7 @@ function AutoClash.resetState()
         S.clashOn, S.clashAt, S.clashHoldUntil, S.clashOffAt, S.lastClashReact = false, 0, 0, 0, 0
         S.dangerEma, S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, 0, false
         S.tImpRiseHist = { 0, 0, 0 }
-        S.targetRingIdx, S.targetCps = 0, 0
+        S.targetRingIdx, S.targetCps, S.lastMaintCheck = 0, 0, 0
         S.lastFireAt = 0
         for i = 1, RING_BUF do
                 S.targetRing[i] = 0
@@ -749,9 +795,6 @@ function AutoClash.resetState()
 end
 
 -- notifyFired
--- setBurstActive
--- getBurstActive
--- setBurstSink
 function AutoClash.notifyFired(t)
         S.lastFireAt = t
 end
