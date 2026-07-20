@@ -5,16 +5,16 @@ local AutoParry = {}
 -- deps
 local Probe, GameInfo, Utils
 
--- tunning
+-- tunning (res mantido, lógica de fogo estilo delta v3)
 local P = {
     -- radius / range
     DEFLECT_R    = 8.5,
     RAD_FLOOR    = 9,
     RAD_MIN      = 9,
     RAD_MAX      = 90,
-    RAD_WIN      = 0.40,
-    RAD_OFF      = 6,
-    RAD_PRE      = 10,
+    RAD_WIN      = 0.40,   -- multiplicador spd → radius (delta v3)
+    RAD_OFF      = 6,      -- offset base (delta v3)
+    RAD_PRE      = 0,      -- raio extra pré-activação (delta v3)
 
     -- velocidade
     MIN_SPD      = 5,      -- minSpeed do delta v3
@@ -388,7 +388,6 @@ local function bindParry(ch)
 
                 -- RAIO estilo delta v3 + res
                 local rad = math.clamp(spd * P.RAD_WIN + P.RAD_OFF, P.RAD_MIN, P.RAD_MAX)
-                    + P.RAD_PRE
                     + resRadiusBonus()
 
                 local d = (bp - hrpPos).Magnitude
