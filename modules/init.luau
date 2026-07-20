@@ -9,7 +9,7 @@ local CONFIG = {
         AutoParry = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/autoparry.luau",
         AutoClash = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/autoclash.luau",
         Spam = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/spam.luau",
-        GUI = "https://raw.githubusercontent.com/Repp35/Roblox/refs/heads/main/phantom_gui.lua"
+        GUI = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/phantom_ui.luau"
     },
     AutoParry = true,
     AutoClash = true,
