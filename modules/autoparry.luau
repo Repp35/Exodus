@@ -7,38 +7,49 @@ local Probe, GameInfo, Utils
 
 -- tunning
 local P = {
-    FIRE_LOCK = 0.080,
-    MIN_SPD = 3,
-    DEFLECT_R = 8.5,
-    RAD_FLOOR = 14,
-    LEAD_CAP = 50,
-    PRE_CAP = 30,
-    PB_WEIGHT = 1.0,
-    CPF_MIN_SPACING_MS = 0.05,
-    CPF_MAX_SPACING_MS = 16,
-    CPF_FPS_SAMPLE_T = 0.5,
-    CPF_PING_FLOOR = 0.040,
-    CPF_PING_REF = 0.060,
-    LEAD_PING_FLOOR = 0.040,
-    LEAD_RTT_MULT = 0.5,
-    LEAD_TICK_FRAMES = 2,
-    RES_BASE = 0,
-    RES_PER_PARRY = 0.225,
-    RES_CAP = 32,
-    RES_HOLD_T = 1.2,
-    RES_DECAY_T = 4.0,
+    -- radius / range
+    DEFLECT_R    = 8.5,
+    RAD_FLOOR    = 9,
+    RAD_MIN      = 9,
+    RAD_MAX      = 90,
+    RAD_WIN      = 0.40,
+    RAD_OFF      = 6,
+    RAD_PRE      = 10,
+
+    -- velocidade
+    MIN_SPD      = 5,      -- minSpeed do delta v3
+
+    -- impact window
+    MAX_IMPACT_T = 0.35,   -- maxImpactTime do delta v3 (sem ping comp; usamos ping do GameInfo)
+    PING_FLOOR   = 0.020,
+    PING_MULT    = 1.1,
+    PING_OFFSET  = 0.02,
+    PING_MAX     = 0.25,
+
+    -- lead simples (suficiente p/ o grace)
+    LEAD_RTT_MULT     = 0.5,
+    LEAD_TICK_FRAMES  = 2,
+    LEAD_PING_FLOOR   = 0.020,
+    LEAD_CAP          = 50,
+
+    -- pre-buffer mantido pra res
+    PRE_CAP           = 30,
+
+    -- res (inalterado)
+    RES_BASE          = 0,
+    RES_PER_PARRY     = 0.225,
+    RES_CAP           = 32,
+    RES_HOLD_T        = 1.2,
+    RES_DECAY_T       = 4.0,
     RES_HITBOX_OWN_WINDOW = 0.5,
-    RES_HITBOX_PROX = 12,
-    MIN_REFIRE_GAP = 0.015,
-    BURST_SIZE = 8,
-    BURST_GAP_FAST = 0.002,
-    BURST_GAP_SLOW = 0.012,
-    TRIGGER_TTH = 0.18,
-    RAD_WIN = 0.20,
-    RAD_OFF = 0,
-    RAD_PRE = 0,
-    RAD_MIN = 9,
-    RAD_MAX = 90
+    RES_HITBOX_PROX   = 12,
+
+    -- ball reset (delta v3)
+    BALL_RESET_THRESH = 50,
+    BALL_RESET_LOCKOUT = 0.6,
+
+    -- target / processing
+    ACTIVATION_DIST_OFFSET = 7,
 }
 
 -- AP
@@ -48,8 +59,7 @@ local AP = {
     firedAt = 0,
     wasInRange = false,
     inRangeEnterAt = 0,
-    burstLeft = 0,
-    burstNextAt = 0
+    -- sem burst
 }
 
 -- RES
@@ -84,6 +94,16 @@ local _localUserId = -1
 local _onFired = nil
 local _lastTargetSeen = -999
 
+-- ball processed (impede duplo clique sem lock fixo)
+local ballProcessed = false
+local ballLeftMe    = false
+local lastBallPos   = nil
+local ballResetAt   = 0
+local _lastProcessReset = 0
+local _vel = Vector3.zero
+local _lastBP, _lastBT = nil, nil
+local _lastParryTime = 0
+
 -- resRadiusBonus
 local function resRadiusBonus()
     return math.min(RES.stack * P.RES_PER_PARRY, P.RES_CAP)
@@ -112,12 +132,12 @@ local function tickResilience(t)
     end
 end
 
--- validRemote (mirror of v22.1 guard)
+-- validRemote
 local function _validRemote(r)
     return typeof(r) == "Instance" and r.Parent ~= nil and r:IsA("RemoteEvent")
 end
 
--- sendParry (mirror of v22.1: re-resolve if invalid OR cache stale)
+-- sendParry
 local function sendParry()
     local t = _now()
     local r, m
@@ -149,7 +169,6 @@ end
 local function resetState()
     AP.armed, AP.fired, AP.firedAt = false, false, 0
     AP.inRangeEnterAt, AP.wasInRange = 0, false
-    AP.burstLeft, AP.burstNextAt = 0, 0
     RES.stack = 0
     RES.lastFireBallRef = nil
     RES.lastFireBallAt = 0
@@ -166,9 +185,18 @@ local function resetState()
     Sync.lastSyncAt = 0
     Sync.forcedAt = 0
     _teleportLockUntil = 0
+    ballProcessed = false
+    ballLeftMe = false
+    lastBallPos = nil
+    ballResetAt = 0
+    _lastProcessReset = 0
+    _vel = Vector3.zero
+    _lastBP, _lastBT = nil, nil
+    _lastParryTime = 0
+    _lastTargetSeen = -999
 end
 
--- onBallSync
+-- onBallSync (mantido: gerencia target/Grace igual o original)
 local function onBallSync(d)
     if typeof(d) ~= "table" then
         return
@@ -213,10 +241,6 @@ local function onBallSync(d)
     else
         newTarget = -999
     end
-    -- FIX DOUBLE-CLICK (match v22.1): se o target NÃO mudou, não toca em AP.fired.
-    -- O reset de AP.fired só rola quando o target REALMENTE muda.
-    -- Regra: "bola foi minha → cliquei → bola parou de ser minha → só posso
-    -- clicar quando ela voltar a ser minha".
     if newTarget == _lastTargetSeen then
         Sync.Target = newTarget
         return
@@ -226,9 +250,15 @@ local function onBallSync(d)
     if newTarget == _localUserId then
         Sync.Grace = false
         AP.fired = false
+        -- bola voltou pra mim: libera processed (igual delta v3)
+        if ballLeftMe then
+            ballProcessed = false
+            ballLeftMe = false
+        end
     elseif newTarget ~= -999 then
         Sync.Grace = true
         if previousTarget == _localUserId then
+            ballLeftMe = true
             AP.fired = false
         end
     else
@@ -244,6 +274,22 @@ local function onBallSync(d)
     end
 end
 
+-- getBallVel (helper)
+local function getBallVel(b)
+    if not (b and b.Parent) then return nil end
+    local ok, av = pcall(function() return b.AssemblyLinearVelocity end)
+    if ok and typeof(av) == "Vector3" and av.Magnitude > 0.1 then
+        return av
+    end
+    return nil
+end
+
+-- ping compensation (delta v3 style)
+local function getPingCompensation()
+    local raw = GameInfo.pingRTT() or 0.05
+    return math.clamp(raw * P.PING_MULT + P.PING_OFFSET, P.PING_FLOOR, P.PING_MAX)
+end
+
 -- bindParry
 local function bindParry(ch)
     _apBind = _apBind + 1
@@ -256,7 +302,7 @@ local function bindParry(ch)
         return
     end
     AP.fired, AP.armed = false, false
-    -- heartbeat
+
     Utils.trackCharacter(
         Utils.getRunService().Heartbeat:Connect(
             function(dt)
@@ -265,116 +311,121 @@ local function bindParry(ch)
                 end
                 local Config = _G.PhantomConfig
                 if not Config or Config.AutoParry ~= true then
-                    AP.fired, AP.burstLeft = false, 0
+                    AP.fired = false
                     return
                 end
                 local t = _now()
+
+                -- grace / locks
                 if t < _teleportLockUntil or Sync.Grace then
                     return
                 end
                 if (_G.PhantomClashOn and _G.PhantomClashOn()) or _G.PhantomManual then
                     return
                 end
+
                 tickResilience(t)
+
                 local ball = GameInfo.getBall()
                 if not (ball and ball.Parent) then
                     return
                 end
+
+                -- alvo precisa ser eu (delta v3)
                 if Sync.Target ~= _localUserId then
                     AP.armed = false
                     return
                 end
-                local syncFresh = (t - Sync.lastSyncAt) < 0.3
-                local bp = (syncFresh and Sync.RealPos ~= Vector3.new(0, 0, 0)) and Sync.RealPos or ball.Position
-                local spd
-                if syncFresh and Sync.Speed > 0 then
-                    spd = Sync.Speed
-                else
-                    local ok, av =
-                        pcall(
-                        function()
-                            return ball.AssemblyLinearVelocity
-                        end
-                    )
-                    spd = (ok and typeof(av) == "Vector3") and av.Magnitude or 0
+
+                -- reseta ballProcessed depois de processResetInt (delta v3)
+                if ballProcessed and (t - _lastProcessReset) >= 0.4 then
+                    ballProcessed = false
                 end
+
+                local bp = ball.Position
+
+                -- detecção de reset por salto de posição
+                if lastBallPos then
+                    local jump = (bp - lastBallPos).Magnitude
+                    if jump > P.BALL_RESET_THRESH then
+                        ballProcessed = true
+                        _lastProcessReset = t
+                        ballResetAt = t
+                        _vel = Vector3.zero
+                        _lastBP, _lastBT = nil, nil
+                        lastBallPos = bp
+                        return
+                    end
+                end
+                lastBallPos = bp
+
+                if (t - ballResetAt) < P.BALL_RESET_LOCKOUT then
+                    return
+                end
+
+                -- velocidade da bola (igual delta v3)
+                local av = getBallVel(ball)
+                if av then
+                    _vel = av
+                    _lastBT, _lastBP = t, bp
+                elseif not _lastBT then
+                    _lastBT, _lastBP = t, bp
+                else
+                    local dtt = t - _lastBT
+                    if dtt > 0 then
+                        local rawV = (bp - _lastBP) / dtt
+                        local a = dt / (0.05 + dt)
+                        _vel = _vel + (rawV - _vel) * a
+                        _lastBT, _lastBP = t, bp
+                    end
+                end
+
+                local hrpPos = hrp.Position
+                local spd = _vel.Magnitude
                 if spd < P.MIN_SPD then
                     return
                 end
-                local tickMs = (GameInfo.frameEMA() > 0 and GameInfo.frameEMA() * 1000) or 16.67
-                local leadSec =
-                    math.max(
-                    GameInfo.pingRTT() * P.LEAD_RTT_MULT + (P.LEAD_TICK_FRAMES * tickMs / 1000),
-                    P.LEAD_PING_FLOOR
-                )
-                local leadB = math.min(spd * leadSec, P.LEAD_CAP)
-                local pbStuds = math.min(GameInfo.preBufferStuds(spd), P.PRE_CAP)
-                local parryRad = math.max(P.DEFLECT_R + leadB + pbStuds + resRadiusBonus(), P.RAD_FLOOR)
-                local dx = hrp.Position.X - bp.X
-                local dy = hrp.Position.Y - bp.Y
-                local dz = hrp.Position.Z - bp.Z
-                if dx * dx + dy * dy + dz * dz > parryRad * parryRad then
+
+                -- RAIO estilo delta v3 + res
+                local rad = math.clamp(spd * P.RAD_WIN + P.RAD_OFF, P.RAD_MIN, P.RAD_MAX)
+                    + P.RAD_PRE
+                    + resRadiusBonus()
+
+                local d = (bp - hrpPos).Magnitude
+                -- precisa estar perto
+                if d > rad then
                     AP.wasInRange, AP.inRangeEnterAt = false, 0
                     return
                 end
                 AP.wasInRange = true
-                if AP.fired then
-                    local toMe = hrp.Position - bp
-                    local ok, av =
-                        pcall(
-                        function()
-                            return ball.AssemblyLinearVelocity
-                        end
-                    )
-                    local vel = (ok and typeof(av) == "Vector3") and av or nil
-                    if vel and vel.Magnitude > 0.5 then
-                        local currentSpd = vel.Magnitude
-                        local rad = math.clamp(currentSpd * P.RAD_WIN + P.RAD_OFF, P.RAD_MIN, P.RAD_MAX) + P.RAD_PRE
-                        local distance = toMe.Magnitude
-                        local inRange = distance <= rad
-                        local closing = distance > 1e-4 and vel:Dot(toMe.Unit) or currentSpd
-                        local timeToHit = currentSpd > 1 and (distance / currentSpd) or math.huge
-                        local imminent = timeToHit < P.TRIGGER_TTH
-                        if imminent and inRange and (t - AP.firedAt) > P.MIN_REFIRE_GAP and AP.burstLeft == 0 then
-                            if sendParry() then
-                                AP.firedAt = t
-                                AP.burstLeft = P.BURST_SIZE - 1
-                                local gap = closing > 80 and P.BURST_GAP_FAST or P.BURST_GAP_SLOW
-                                AP.burstNextAt = t + gap
-                            end
-                        elseif AP.burstLeft > 0 and t >= AP.burstNextAt then
-                            if sendParry() then
-                                AP.burstLeft = AP.burstLeft - 1
-                                local gap = closing > 80 and P.BURST_GAP_FAST or P.BURST_GAP_SLOW
-                                AP.burstNextAt = t + gap
-                                AP.firedAt = t
-                            else
-                                AP.burstLeft = 0
-                            end
-                        end
-                    end
+
+                -- aproximando?
+                local app = _vel:Dot(hrpPos - bp) > 0
+                if not app then return end
+
+                -- impact time + ping comp
+                local tImp = spd > 1 and (d / spd) or 1e9
+                local ping = getPingCompensation()
+                if tImp > (P.MAX_IMPACT_T + ping) then
                     return
                 end
-                if AP.firedAt > Sync.lastSyncAt then
+
+                -- sem cooldown fixo: só ballProcessed
+                if ballProcessed then
                     return
                 end
-                if (t - AP.firedAt) < P.FIRE_LOCK then
-                    return
-                end
-                GameInfo.accumPingTimer(dt)
-                if GameInfo.shouldSamplePing(1.5) then
-                    GameInfo.samplePing()
-                end
-                AP.burstLeft, AP.burstNextAt = 0, 0
+
+                -- FOGO
                 if sendParry() then
-                    AP.fired, AP.firedAt = true, t
-                else
-                    AP.fired = false
+                    ballProcessed = true
+                    _lastProcessReset = t
+                    _lastParryTime = t
+                    AP.firedAt = t
                 end
             end
         )
     )
-    -- ancestry
+
     Utils.trackCharacter(
         ch.AncestryChanged:Connect(
             function(_, parent)
