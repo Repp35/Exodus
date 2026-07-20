@@ -244,20 +244,14 @@ local function onBallSync(d)
     else
         newTarget = -999
     end
-    if newTarget == _lastTargetSeen then
-        Sync.Target = newTarget
-        return
-    end
     local previousTarget = _lastTargetSeen
     _lastTargetSeen, Sync.Target = newTarget, newTarget
     if newTarget == _localUserId then
         Sync.Grace = false
         AP.fired = false
-        -- bola voltou pra mim: libera processed (próximo ciclo)
-        if ballLeftMe then
-            ballProcessed = false
-            ballLeftMe = false
-        end
+        -- target é eu: libera processed pra poder clicar de novo
+        ballProcessed = false
+        ballLeftMe = false
     elseif newTarget ~= -999 then
         Sync.Grace = true
         if previousTarget == _localUserId then
@@ -338,8 +332,6 @@ local function bindParry(ch)
                 if Sync.Target ~= _localUserId then
                     AP.armed = false
                     AP.fired = false
-                    -- bola não é minha: libera processed pra próxima vez que voltar
-                    ballProcessed = false
                     return
                 end
 
