@@ -1,4 +1,4 @@
---[[ AutoParry slaa ]]
+--[[ AutoParry sla ]]
 
 local AutoParry = {}
 
@@ -48,10 +48,7 @@ local P = {
     -- ball reset (delta v3)
     BALL_RESET_THRESH = 50,
     BALL_RESET_LOCKOUT = 0.6,
-    PROCESS_RESET_INT  = 1.5,   -- lockout após disparo/reset (cobre o ciclo da bola voltar)
-    PROCESS_MIN_LOCK   = 0.8,   -- mínimo absoluto desde o último fire
-    PROCESS_FAR_DIST   = 120,   -- se a bola passar dessa distância, libera (definitivamente outra jogada)
-    PROCESS_FAR_TIME   = 2.0,   -- tempo desde o fire pra considerar a bola "longe" como timeout
+    PROCESS_RESET_INT  = 0.4,   -- libera processed após esse tempo (delta v3 puro)
     VEL_SMOOTH         = 0.05,
 
     -- target / processing
@@ -106,7 +103,6 @@ local ballLeftMe    = false
 local lastBallPos   = nil
 local ballResetAt   = 0
 local _lastProcessReset = 0
-local _lastFireAt   = 0       -- marca temporal do último disparo p/ lock mínimo
 local _vel = Vector3.zero
 local _lastBP, _lastBT = nil, nil
 local _lastParryTime = 0
@@ -197,7 +193,6 @@ local function resetState()
     lastBallPos = nil
     ballResetAt = 0
     _lastProcessReset = 0
-    _lastFireAt = 0
     _vel = Vector3.zero
     _lastBP, _lastBT = nil, nil
     _lastParryTime = 0
@@ -258,17 +253,16 @@ local function onBallSync(d)
     if newTarget == _localUserId then
         Sync.Grace = false
         AP.fired = false
-        -- bola voltou pra mim: NÃO libera processed aqui.
-        -- O heartbeat libera só quando a bola passa do range e não vem
-        -- mais em minha direção (condição de "realmente saiu").
-        ballLeftMe = false
+        -- bola voltou pra mim: libera processed (próximo ciclo)
+        if ballLeftMe then
+            ballProcessed = false
+            ballLeftMe = false
+        end
     elseif newTarget ~= -999 then
         Sync.Grace = true
         if previousTarget == _localUserId then
             ballLeftMe = true
             AP.fired = false
-            -- bola saiu de mim: marca processed, deixa o heartbeat
-            -- liberar quando a bola estiver longe o suficiente.
         end
     else
         AP.fired = false
@@ -343,11 +337,9 @@ local function bindParry(ch)
                 -- alvo precisa ser eu (delta v3)
                 if Sync.Target ~= _localUserId then
                     AP.armed = false
-                    -- bola não é minha: NÃO libera ballProcessed aqui.
-                    -- Só o onBallSync libera quando a bola CONFIRMADAMENTE
-                    -- saiu de mim (voltou pra outro player e a bola já saiu
-                    -- do meu range). Isso impede o "target volta e dispara de novo".
                     AP.fired = false
+                    -- bola não é minha: libera processed pra próxima vez que voltar
+                    ballProcessed = false
                     return
                 end
 
@@ -360,12 +352,6 @@ local function bindParry(ch)
                     if jump > P.BALL_RESET_THRESH then
                         ballProcessed = true
                         _lastProcessReset = t
-                        -- se o último fire foi muito recente, mantém o
-                        -- _lastProcessReset no tempo do fire pra honrar
-                        -- PROCESS_MIN_LOCK no fallback.
-                        if _lastFireAt > _lastProcessReset then
-                            _lastProcessReset = _lastFireAt
-                        end
                         ballResetAt = t
                         _vel = Vector3.zero
                         _lastBP, _lastBT = nil, nil
@@ -407,22 +393,34 @@ local function bindParry(ch)
                 local tImp   = spd > 1 and (d / spd) or 1e9
                 local ping   = getPingCompensation()
 
-                -- fallback: libera ballProcessed só depois de:
-                --   1) processar no servidor (PROCESS_RESET_INT) E
-                --   2) ter passado o lock mínimo desde o último fire
-                --   3) a bola NÃO estar mais se aproximando de mim
-                -- OU timeout de segurança: bola muito longe por muito tempo
-                --    (target mudou silenciosamente, sync não chegou)
-                if ballProcessed then
-                    local sinceFire    = t - _lastFireAt
-                    local sinceReset   = t - _lastProcessReset
-                    local farAway      = (d > P.PROCESS_FAR_DIST) and (sinceFire >= P.PROCESS_FAR_TIME)
-                    if farAway
-                        or (sinceFire >= P.PROCESS_MIN_LOCK
-                            and sinceReset >= P.PROCESS_RESET_INT
-                            and (not app)
-                            and (d > rad * 0.75)) then
-                        ballProcessed = false
+                -- RAIO: igual ao DELTA V3 original
+                -- clamp(spd*radiusWin + radiusOff, minRadius, maxRadius)
+                -- (sem pre, sem floor, sem lead, sem preBufferStuds — só o cálculo cru)
+                local hrpPos = hrp.Position
+                local spd    = _vel.Magnitude
+                local rad = math.clamp(spd * P.RAD_WIN + P.RAD_OFF, P.RAD_MIN, P.RAD_MAX) + resRadiusBonus()
+                local d      = (bp - hrpPos).Magnitude
+                local app    = _vel:Dot(hrpPos - bp) > 0
+                local tImp   = spd > 1 and (d / spd) or 1e9
+                local ping   = getPingCompensation()
+
+                -- fallback simples: libera ballProcessed após PROCESS_RESET_INT
+                if ballProcessed and (t - _lastProcessReset) >= P.PROCESS_RESET_INT then
+                    ballProcessed = false
+                end
+
+                local can = app and spd > P.MIN_SPD
+                    and d <= rad
+                    and tImp <= (P.MAX_IMPACT_T + ping)
+
+                -- sem cooldown fixo: só ballProcessed (delta v3)
+                if can and not ballProcessed then
+                    if sendParry() then
+                        ballProcessed = true
+                        _lastProcessReset = t
+                        _lastParryTime = t
+                        AP.fired = true
+                        AP.firedAt = t
                     end
                 end
 
