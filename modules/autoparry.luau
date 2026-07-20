@@ -1,4 +1,4 @@
---[[ AutoParry ]]
+--[[ AutoParry delta ]]
 
 local AutoParry = {}
 
@@ -386,8 +386,20 @@ local function bindParry(ch)
                     return
                 end
 
-                -- RAIO estilo delta v3 + res
+                -- RAIO: fórmula delta v3 + lead (que escala com spd) + res
+                -- sem RAD_PRE, mas com lead dinâmico (leadB) + pre-buffer do GameInfo,
+                -- então em spd alta o raio cresce sozinho sem ficar fixo em 10.
+                local leadSec = math.max(
+                    (GameInfo.pingRTT() or 0.05) * P.LEAD_RTT_MULT
+                        + (P.LEAD_TICK_FRAMES * 16.67 / 1000),
+                    P.LEAD_PING_FLOOR
+                )
+                local leadB = math.min(spd * leadSec, P.LEAD_CAP)
+                local pbStuds = math.min(GameInfo.preBufferStuds and GameInfo.preBufferStuds(spd) or 0, P.PRE_CAP)
+
                 local rad = math.clamp(spd * P.RAD_WIN + P.RAD_OFF, P.RAD_MIN, P.RAD_MAX)
+                    + leadB
+                    + pbStuds
                     + resRadiusBonus()
 
                 local d = (bp - hrpPos).Magnitude
