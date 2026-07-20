@@ -16,7 +16,7 @@ local UIS = game:GetService("UserInputService")
 local now = os.clock
 local INF = math.huge
 local V3ZERO = Vector3.new(0, 0, 0)
-local DEFAULT_CPS = 25
+local DEFAULT_CPS = 4
 
 -- state
 local State = {active = true, conns = {}, charConns = {}}
