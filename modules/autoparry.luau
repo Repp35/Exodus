@@ -1,4 +1,4 @@
---[[ AutoParry ]]
+--[[ AutoParry fallback ]]
 
 local AutoParry = {}
 
@@ -280,7 +280,7 @@ local function bindParry(ch)
                 if not (ball and ball.Parent) then
                     return
                 end
-                if Sync.Target ~= _localUserId then
+                if not tgtOn(ch) then
                     AP.armed = false
                     return
                 end
@@ -384,6 +384,44 @@ local function bindParry(ch)
             end
         )
     )
+end
+
+-- tgtOn (3 fallbacks, mais rápido vence — estilo deltav3)
+local _br
+local function _ensureBR()
+    if _br ~= nil then return _br end
+    local ok, mod = pcall(function()
+        return Utils.getReplicatedStorage()
+            :WaitForChild("TS", 5)
+            :WaitForChild("BallReplicator", 5)
+            :WaitForChild("BallReplicator", 5)
+    end)
+    if ok and mod and mod.BallReplicator then
+        _br = mod.BallReplicator
+    else
+        _br = false
+    end
+    return _br
+end
+
+local function tgtOn(ch)
+    if not ch or not ch.Parent then return false end
+    -- 1) Highlight visual (local, instantâneo)
+    if ch:FindFirstChild("Highlight") then return true end
+    -- 2) Workspace attribute (replicado, rápido)
+    if Utils.getWorkspace():GetAttribute("GameBallTarget") == _localUserId then
+        return true
+    end
+    -- 3) BallReplicator.syncData (cache RAM)
+    local br = _ensureBR()
+    if br and br.syncData and br.syncData.HighlightTargetPlayerID == _localUserId then
+        return true
+    end
+    -- 4) Sync.Target (último recurso, derivado do server sync)
+    if Sync and Sync.Target == _localUserId then
+        return true
+    end
+    return false
 end
 
 -- setup
