@@ -112,21 +112,27 @@ local function tickResilience(t)
     end
 end
 
--- sendParry
+-- validRemote (mirror of v22.1 guard)
+local function _validRemote(r)
+    return typeof(r) == "Instance" and r.Parent ~= nil and r:IsA("RemoteEvent")
+end
+
+-- sendParry (mirror of v22.1: re-resolve if invalid OR cache stale)
 local function sendParry()
     local t = _now()
-    local r
-    if t - _resolveCache > 3.0 then
-        r = Probe.resolveRemote()
+    local r, m
+    if (not _validRemote(Probe.getRemote())) or (t - _resolveCache) > 3.0 then
+        r, m = Probe.resolveRemote()
         _resolveCache = t
     else
-        r = Probe.getRemote()
+        r, m = Probe.getRemote()
     end
     if not r then
         return false
     end
     if not Probe.fireParry(1) then
         _resolveCache = 0
+        Probe.invalidate()
         return false
     end
     local b = GameInfo.getBall()
@@ -204,14 +210,29 @@ local function onBallSync(d)
     local newTarget = d.TargetPlayerID
     if type(newTarget) == "number" then
         Sync.Target = newTarget
+    else
+        newTarget = -999
     end
-    if newTarget ~= _lastTargetSeen then
-        if newTarget == _localUserId then
-            Sync.Grace = false
-        elseif newTarget ~= _localUserId and newTarget ~= -999 then
-            Sync.Grace = true
+    -- FIX DOUBLE-CLICK (match v22.1): se o target NÃO mudou, não toca em AP.fired.
+    -- O reset de AP.fired só rola quando o target REALMENTE muda.
+    -- Regra: "bola foi minha → cliquei → bola parou de ser minha → só posso
+    -- clicar quando ela voltar a ser minha".
+    if newTarget == _lastTargetSeen then
+        Sync.Target = newTarget
+        return
+    end
+    local previousTarget = _lastTargetSeen
+    _lastTargetSeen, Sync.Target = newTarget, newTarget
+    if newTarget == _localUserId then
+        Sync.Grace = false
+        AP.fired = false
+    elseif newTarget ~= -999 then
+        Sync.Grace = true
+        if previousTarget == _localUserId then
+            AP.fired = false
         end
-        _lastTargetSeen = newTarget
+    else
+        AP.fired = false
     end
     if d.Grace == false then
         Sync.Grace = false
