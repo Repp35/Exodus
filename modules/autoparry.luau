@@ -1,4 +1,4 @@
---[[ AutoParry delta ]]
+--[[ AutoParry sla ]]
 
 local AutoParry = {}
 
@@ -15,6 +15,7 @@ local P = {
     RAD_WIN      = 0.40,   -- multiplicador spd → radius (delta v3)
     RAD_OFF      = 6,      -- offset base (delta v3)
     RAD_PRE      = 0,      -- raio extra pré-activação (delta v3)
+    RAD_FLOOR    = 14,     -- raio MÍNIMO (igual original, garante click em spd baixa)
 
     -- velocidade
     MIN_SPD      = 5,      -- minSpeed do delta v3
@@ -47,6 +48,8 @@ local P = {
     -- ball reset (delta v3)
     BALL_RESET_THRESH = 50,
     BALL_RESET_LOCKOUT = 0.6,
+    PROCESS_RESET_INT  = 0.4,
+    VEL_SMOOTH         = 0.05,
 
     -- target / processing
     ACTIVATION_DIST_OFFSET = 7,
@@ -334,17 +337,16 @@ local function bindParry(ch)
                 -- alvo precisa ser eu (delta v3)
                 if Sync.Target ~= _localUserId then
                     AP.armed = false
+                    -- bola não é minha: libera tudo
+                    AP.fired = false
+                    ballProcessed = false
                     return
                 end
 
-                -- reseta ballProcessed depois de processResetInt (delta v3)
-                if ballProcessed and (t - _lastProcessReset) >= 0.4 then
-                    ballProcessed = false
-                end
-
+                -- bp = posição real da bola (igual delta v3, sem lead)
                 local bp = ball.Position
 
-                -- detecção de reset por salto de posição
+                -- detecta reset por salto de posição (delta v3)
                 if lastBallPos then
                     local jump = (bp - lastBallPos).Magnitude
                     if jump > P.BALL_RESET_THRESH then
@@ -373,65 +375,50 @@ local function bindParry(ch)
                 else
                     local dtt = t - _lastBT
                     if dtt > 0 then
-                        local rawV = (bp - _lastBP) / dtt
-                        local a = dt / (0.05 + dt)
-                        _vel = _vel + (rawV - _vel) * a
+                        local raw = (bp - _lastBP) / dtt
+                        local a   = dt / (P.VEL_SMOOTH + dt)
+                        _vel = _vel + (raw - _vel) * a
                         _lastBT, _lastBP = t, bp
                     end
                 end
 
-                local hrpPos = hrp.Position
-                local spd = _vel.Magnitude
-                if spd < P.MIN_SPD then
-                    return
+                -- fallback: libera ballProcessed após processResetInt (delta v3)
+                if ballProcessed and (t - _lastProcessReset) >= P.PROCESS_RESET_INT then
+                    ballProcessed = false
                 end
 
-                -- RAIO: fórmula delta v3 + lead (que escala com spd) + res
-                -- sem RAD_PRE, mas com lead dinâmico (leadB) + pre-buffer do GameInfo,
-                -- então em spd alta o raio cresce sozinho sem ficar fixo em 10.
+                -- RAIO: igual ao ORIGINAL Phantom (não o delta v3)
+                -- max(8.5 + leadB + pbStuds + res, 14)
+                -- com leadB e pbStuds escalando com a velocidade
+                local hrpPos = hrp.Position
+                local spd    = _vel.Magnitude
+                local tickMs = (GameInfo.frameEMA and GameInfo.frameEMA() > 0 and GameInfo.frameEMA() * 1000) or 16.67
                 local leadSec = math.max(
-                    (GameInfo.pingRTT() or 0.05) * P.LEAD_RTT_MULT
-                        + (P.LEAD_TICK_FRAMES * 16.67 / 1000),
+                    (GameInfo.pingRTT and GameInfo.pingRTT() or 0.05) * P.LEAD_RTT_MULT
+                        + (P.LEAD_TICK_FRAMES * tickMs / 1000),
                     P.LEAD_PING_FLOOR
                 )
                 local leadB = math.min(spd * leadSec, P.LEAD_CAP)
                 local pbStuds = math.min(GameInfo.preBufferStuds and GameInfo.preBufferStuds(spd) or 0, P.PRE_CAP)
+                local rad = math.max(P.DEFLECT_R + leadB + pbStuds + resRadiusBonus(), P.RAD_FLOOR)
+                local d      = (bp - hrpPos).Magnitude
+                local app    = _vel:Dot(hrpPos - bp) > 0
+                local tImp   = spd > 1 and (d / spd) or 1e9
+                local ping   = getPingCompensation()
 
-                local rad = math.clamp(spd * P.RAD_WIN + P.RAD_OFF, P.RAD_MIN, P.RAD_MAX)
-                    + leadB
-                    + pbStuds
-                    + resRadiusBonus()
+                local can = app and spd > P.MIN_SPD
+                    and d <= rad
+                    and tImp <= (P.MAX_IMPACT_T + ping)
 
-                local d = (bp - hrpPos).Magnitude
-                -- precisa estar perto
-                if d > rad then
-                    AP.wasInRange, AP.inRangeEnterAt = false, 0
-                    return
-                end
-                AP.wasInRange = true
-
-                -- aproximando?
-                local app = _vel:Dot(hrpPos - bp) > 0
-                if not app then return end
-
-                -- impact time + ping comp
-                local tImp = spd > 1 and (d / spd) or 1e9
-                local ping = getPingCompensation()
-                if tImp > (P.MAX_IMPACT_T + ping) then
-                    return
-                end
-
-                -- sem cooldown fixo: só ballProcessed
-                if ballProcessed then
-                    return
-                end
-
-                -- FOGO
-                if sendParry() then
-                    ballProcessed = true
-                    _lastProcessReset = t
-                    _lastParryTime = t
-                    AP.firedAt = t
+                -- sem cooldown fixo: só ballProcessed (delta v3)
+                if can and not ballProcessed then
+                    if sendParry() then
+                        ballProcessed = true
+                        _lastProcessReset = t
+                        _lastParryTime = t
+                        AP.fired = true
+                        AP.firedAt = t
+                    end
                 end
             end
         )
