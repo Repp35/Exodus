@@ -3,12 +3,12 @@
 -- CONFIG
 local CONFIG = {
     ModuleURLs = {
-        Utils = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/utils.luau",
-        GameInfo = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/gameInfo.luau",
-        Probe = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/probe.luau",
-        AutoParry = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/autoparry.luau",
-        AutoClash = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/autoclash.luau",
-        Spam = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/source/spam.luau",
+        Utils = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/utils.luau",
+        GameInfo = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/gameinfo.luau",
+        Probe = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/probe.luau",
+        AutoParry = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/autoparry.luau",
+        AutoClash = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/autoclash.luau",
+        Spam = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/spam.luau",
         GUI = "https://raw.githubusercontent.com/Repp35/Roblox/refs/heads/main/phantom_gui.lua"
     },
     AutoParry = true,
