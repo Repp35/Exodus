@@ -1,4 +1,4 @@
---[[ AutoParry sla ]]
+--[[ AutoParry slaa ]]
 
 local AutoParry = {}
 
