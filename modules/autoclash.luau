@@ -411,10 +411,8 @@ local function onTarget(newTarget, t)
 				and impactTime <= CLASH.OFF_FAST
 				and (t - S.lastClashReact) >= CLASH.REACT_CD
 			then
-				S.clashOn = true
-				S.clashAt = t
+				activateBurst(t, Config)
 				S.clashHoldUntil = t + CLASH.HOLD
-				S.lastClashReact = t
 			end
 		end
 	end
