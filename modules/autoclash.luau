@@ -273,8 +273,11 @@ local function clashSnapshot()
         local bDist = (hr.Position - bp).Magnitude
         local panic = nearestAlive and (nearest <= CLASH.PANIC_DIST and bDist <= CLASH.PANIC_BALL)
         local live = GameInfo.liveTImp()
-        local tImp, spd = live.tImp, live.spd
-        if spd < 1 then
+        local tImp, spd
+        if live and typeof(live) == "table" then
+                tImp, spd = live.tImp, live.spd
+        end
+        if not spd or spd < 1 then
                 local ti, _, s2 = GameInfo.computeTImp(hr, ball, t)
                 tImp, spd = ti, s2
         end
