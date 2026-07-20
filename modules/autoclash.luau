@@ -436,17 +436,41 @@ local function evaluateClash(t, hr, ball, Config)
 		S.burstSignalDuringOn = false
 		return
 	end
+	
+	-- Detector roda SEMPRE, inclusive quando clashOn
 	tickReturnDetector(t, hr, ball)
+	
+	-- Desativação por condições extremas (morte, teleporte, bola sumiu)
+	if S.clashOn and shouldDeactivateClash() then
+		clearClash()
+		S.burstState          = "IDLE"
+		S.burstSignalDuringOn = false
+		return
+	end
+	
+	-- Se clash está on, só o burst renova o hold
+	-- O maintain segura o clash via shouldMaintainClash
 	if S.clashOn then
-		if shouldDeactivateClash() then
-			clearClash()
-			S.burstState          = "IDLE"
-			S.burstSignalDuringOn = false
+		-- Burst em ON: renova se houver sinal
+		if S.burstState == "ON" then
+			if S.detSignal then
+				S.burstSignalDuringOn = true
+			end
+			-- Não vai pro OFF: deixa o maintain decidir
+			-- Só renova o hold se houver sinal
+			if S.burstSignalDuringOn then
+				S.burstOnStart        = t
+				S.burstSignalDuringOn = false
+				S.clashHoldUntil      = t + CLASH.BURST_ON_MS
+			end
 		end
 		return
 	end
+	
+	-- Clash não está on: máquina de burst normal
 	local antiDashActive = S.dashAnti.untilT > t
 	local canFire = (S.detSignal and isTargeted()) or antiDashActive
+	
 	if S.burstState == "IDLE" then
 		if canFire then
 			activateBurst(t, Config)
