@@ -2,7 +2,7 @@
     Phantom Ball GUI
     Paleta: Azul / Roxo / Rosa
 ]]
-local SCRIPT_VERSION = "19"
+local SCRIPT_VERSION = "21"
 local SCRIPT_NAME = "PhantomBallGUI"
 
 -- SERVICOS
