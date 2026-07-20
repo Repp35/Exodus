@@ -82,6 +82,7 @@ local _resolveCache = 0
 local _now = os.clock
 local _localUserId = -1
 local _onFired = nil
+local _lastTargetSeen = -999
 
 -- resRadiusBonus
 local function resRadiusBonus()
@@ -201,8 +202,21 @@ local function onBallSync(d)
     Sync.Teleported = false
     GameInfo.applySync(d)
     local newTarget = d.TargetPlayerID
-    if newTarget ~= _G.PhantomLastTarget and newTarget == _localUserId then
+    if type(newTarget) == "number" then
+        Sync.Target = newTarget
+    end
+    if newTarget ~= _lastTargetSeen then
+        if newTarget == _localUserId then
+            Sync.Grace = false
+        elseif newTarget ~= _localUserId and newTarget ~= -999 then
+            Sync.Grace = true
+        end
+        _lastTargetSeen = newTarget
+    end
+    if d.Grace == false then
         Sync.Grace = false
+    elseif d.Grace == true then
+        Sync.Grace = true
     end
     if _G.PhantomOnTarget then
         _G.PhantomOnTarget(newTarget, t)
