@@ -328,17 +328,17 @@ local function shouldDeactivateClash()
         local dist = ctx.bDist
         local spd  = ctx.spd or 0
         local rad  = effectiveRadius(spd)
+        
+        -- Critério 1: Bola escapou de vez (muito longe)
+        if dist > rad * 2.0 then return true end
+        
+        -- Critério 2: Bola saiu do raio e não retornou na janela de retorno
         if S.detPhase == "EXITED" then
-                local window    = (S.detEntryTime or 0) * CLASH.DET_RETURN_FACTOR
-                local elapsed   = t - S.detExitAt
-                local threshold = math.max(window, CLASH.DEACT_RETURN_FLOOR_MS)
-                if elapsed > threshold then return true end
+                local returnWindow = (S.detEntryTime or 0) * CLASH.DET_RETURN_FACTOR
+                local elapsed = t - S.detExitAt
+                if elapsed > returnWindow then return true end
         end
-        if trackDotLeaving(ctx.ball, hr, t) then return true end
-        if dist > rad * CLASH.DEACT_GONE_FACTOR then return true end
-        if ctx.tImp > deactTimpMax(spd) * CLASH.DEACT_TIMP_FACTOR then return true end
-        if not isTargeted() and dist > rad * CLASH.DEACT_NOTARGET_FACTOR then return true end
-        if spd < CLASH.DEACT_STOP_SPD and dist > CLASH.DEACT_STOP_DIST then return true end
+        
         return false
 end
 
