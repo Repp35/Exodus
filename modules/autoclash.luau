@@ -11,6 +11,7 @@ local CLASH = {
         CPS_THRESH               = 8,
         OFF_FAST                 = 0.050,
         MAX_HOLD                 = 1.2,
+        DEACT_GRACE              = 0.35,
         BURST_ON_MS              = 0.080,
         BURST_OFF_MS             = 0.060,
         SPAM_PRE_FILL_FRAMES     = 4,
@@ -98,6 +99,8 @@ local S = {
         burstSignalDuringOn = false,
         dashAnti        = { untilT = 0, src = nil },
         dotLeaveStart   = -1,
+        deactPendingAt  = 0,
+        deactReason     = nil,
 }
 
 -- helpers
@@ -328,17 +331,52 @@ local function shouldDeactivateClash()
         local dist = ctx.bDist
         local spd  = ctx.spd or 0
         local rad  = effectiveRadius(spd)
-        
-        -- Critério 1: Bola escapou de vez (muito longe)
-        if dist > rad * 2.0 then return true end
-        
+
+        -- dot atual da bola em relação a mim
+        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+        local dot = 0
+        if ok and typeof(av) == "Vector3" and av.Magnitude > 0.1 then
+                local toMe = hr.Position - ball.Position
+                if toMe.Magnitude > 0.1 then
+                        dot = av.Unit:Dot(toMe.Unit)
+                end
+        end
+
+        local targetedNow = isTargeted()
+        local inParry = dist <= rad
+        local threat = targetedNow and (dot > 0.1 or dist < rad * 1.5)
+
+        -- Regra mestre: se a bola está dentro do raio de parry, nunca desliga
+        if inParry then
+                S.deactReason = nil
+                S.deactPendingAt = 0
+                return false
+        end
+
+        -- Critério 1: Bola escapou de vez (muito longe) - com grace se ainda é ameaça
+        if dist > rad * 2.0 then
+                if threat then
+                        S.deactReason = "FAR"
+                        return false
+                end
+                return true
+        end
+
         -- Critério 2: Bola saiu do raio e não retornou na janela de retorno
         if S.detPhase == "EXITED" then
                 local returnWindow = (S.detEntryTime or 0) * CLASH.DET_RETURN_FACTOR
                 local elapsed = t - S.detExitAt
-                if elapsed > returnWindow then return true end
+                if elapsed > returnWindow then
+                        if threat then
+                                S.deactReason = "EXITED"
+                                return false
+                        end
+                        return true
+                end
         end
-        
+
+        -- bola ainda é ameaça real, não desliga
+        S.deactReason = nil
         return false
 end
 
@@ -395,9 +433,20 @@ local function evaluateClash(t, hr, ball, Config)
         end
         tickReturnDetector(t, hr, ball)
         if S.clashOn and shouldDeactivateClash() then
-                clearClash()
-                S.burstState, S.burstSignalDuringOn = "IDLE", false
-                return
+                if S.deactReason and S.deactPendingAt == 0 then
+                        S.deactPendingAt = t
+                elseif S.deactReason and (t - S.deactPendingAt) >= CLASH.DEACT_GRACE then
+                        clearClash()
+                        S.burstState, S.burstSignalDuringOn = "IDLE", false
+                        S.deactPendingAt, S.deactReason = 0, nil
+                        return
+                else
+                        return
+                end
+        elseif S.clashOn and not shouldDeactivateClash() then
+                if S.deactPendingAt ~= 0 or S.deactReason then
+                        S.deactPendingAt, S.deactReason = 0, nil
+                end
         end
         if S.clashOn then
                 if S.burstState == "ON" and S.detSignal then
@@ -641,6 +690,7 @@ function AutoClash.resetState()
         S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
         S.dashAnti = { untilT = 0, src = nil }
         S.dotLeaveStart = -1
+        S.deactPendingAt, S.deactReason = 0, nil
         _ctxCache.valid = false
 end
 
