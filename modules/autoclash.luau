@@ -606,11 +606,13 @@ end
 
 -- api
 function AutoClash.setup(deps)
+        deps = deps or {}
         _Probe    = deps.Probe
         GameInfo  = deps.GameInfo
         Utils     = deps.Utils
         AutoParry = deps.AutoParry
-        _localUserId = Utils.getLocalPlayer().UserId
+        local ok, lp = pcall(Utils.getLocalPlayer)
+        _localUserId = (ok and lp and lp.UserId) or -1
         _G.PhantomClashOn    = function() return S.clashOn end
         _G.PhantomOnTarget   = onTarget
         _G.PhantomOnTeleport = clearClash
