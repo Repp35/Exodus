@@ -61,7 +61,13 @@ local CLASH = {
         MAINT_CHECK_INTERVAL     = 0.040,
         MAINT_HOLD_MIN           = 0.080,
         MAINT_BALL_RADIUS        = 25,
+        MAINT_TIMP_MAX           = 0.40,
+        MAINT_PARRY_KEEP         = 0.18,
+        MAINT_TARGET_KEEP        = 0.22,
         MAINT_BALL_GONE_DIST     = 60,
+        MAINT_DEAD_ZONE          = 2.0,
+        MAINT_STOP_RADIUS        = 30,
+        MAINT_BALL_APPROACH_DOT  = -0.20,
         SPAM_PRE_FILL_FRAMES     = 4,
         BURST_ON_MS              = 0.080,
         BURST_OFF_MS             = 0.060,
@@ -168,6 +174,11 @@ local function tImpCapFor(spd, base, refSpd, lo, hi)
         local s = math.clamp(refSpd / spd, 0.2, 2.5)
         return math.clamp(base * s, lo, hi)
 end
+
+-- maintTimpMax
+-- deactTimpMax
+local function maintTimpMax(spd) return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.06, 0.40) end
+local function deactTimpMax(spd) return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.08, 0.40) end
 
 -- isTargeted
 local function isTargeted()
@@ -280,44 +291,19 @@ function AutoClash.invalidateSnapshot()
         _ctxCache.valid = false
 end
 
--- parryRadius(spd)
--- Raio ÚNICO usado para tudo: ativação, manutenção e desativação adaptativa.
--- É a referência do parry + buffer de velocidade + floor.
-local function parryRadius(spd)
-        local base = P.DEFLECT_R
-                + GameInfo.preBufferStuds(spd)
-                + (AutoParry and AutoParry.resRadiusBonus() or 0)
-        return math.max(base, CLASH.MAINT_BALL_RADIUS)
-end
-
--- fatalClashFault
--- Retorna true quando o clash tem que ser cortado AGORA,
--- independente de distância. Só casos fatais.
-local function fatalClashFault(t)
-        -- Teto duro de duração
-        if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
-
-        local lp = Utils.getLocalPlayer()
-        local myChar = lp and lp.Character
-        if not (myChar and myChar.Parent) then return true end
-        local myHum = myChar:FindFirstChildOfClass("Humanoid")
-        if not (myHum and myHum.Parent and myHum.Health > 0) then return true end
-        local hr = myChar:FindFirstChild("HumanoidRootPart")
-        if not (hr and hr.Parent) then return true end
-        local ball = GameInfo.getBall()
-        if not (ball and ball.Parent) then return true end
-
-        -- Bola teleportou / sumiu de vez
-        local ctx = clashSnapshot()
-        if ctx and ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return true end
-
-        return false
+-- maintRadius
+local function maintRadius(spd)
+        local base = math.max(
+                P.DEFLECT_R + GameInfo.preBufferStuds(spd) + (AutoParry and AutoParry.resRadiusBonus() or 0),
+                CLASH.MAINT_BALL_RADIUS
+        )
+        return math.min(base, 55)
 end
 
 -- shouldMaintainClash
--- Regra única: a bola está dentro do raio do parry → spama.
--- Qualquer saída é tratada pela desativação adaptativa
--- (saiu do raio e não voltou na janela do detector → desliga).
+-- Regra simples: a bola entrou no range de clash, então ela pode
+-- voltar a qualquer momento. Mantém o spam até a bola sair do range
+-- ou um evento fatal acontecer (morte, bola sumiu, duração máxima).
 local function shouldMaintainClash()
         if not S.clashOn then return false end
         local t = _now()
@@ -325,17 +311,42 @@ local function shouldMaintainClash()
         -- Hold mínimo: nunca corta logo após ativar
         if (t - S.clashAt) < CLASH.MAINT_HOLD_MIN then return true end
 
-        -- Casos fatais desligam o clash inteiro
-        if fatalClashFault(t) then return false end
+        -- Teto duro de duração
+        if (t - S.clashAt) > CLASH.MAX_HOLD then return false end
 
+        -- Fatais: morreu / bola sumiu / HRP sumiu
+        local lp = Utils.getLocalPlayer()
+        local myChar = lp and lp.Character
+        if not (myChar and myChar.Parent) then return false end
+        local myHum = myChar:FindFirstChildOfClass("Humanoid")
+        if not (myHum and myHum.Parent and myHum.Health > 0) then return false end
+        local ball = GameInfo.getBall()
+        if not (ball and ball.Parent) then return false end
+        local hr = myChar:FindFirstChild("HumanoidRootPart")
+        if not (hr and hr.Parent) then return false end
+
+        -- Se a bola ainda tá dentro do range de ativação (BALL_HARD_CAP),
+        -- spama. Simples assim.
         local ctx = clashSnapshot()
+        if ctx and ctx.bDist <= CLASH.BALL_HARD_CAP then
+                return true
+        end
+
         -- Sem leitura de contexto: mantém por inércia
         if not ctx then return true end
 
-        -- ÚNICA condição de manutenção:
-        -- a bola está dentro do raio do parry? → mantém
-        local rad = parryRadius(ctx.spd)
-        return ctx.bDist <= rad
+        -- Bola escapou de vez
+        if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return false end
+
+        -- Bola fora do range duro mas ainda no "stop radius" + alvo
+        -- marcado / parry recente: segura mais um pouco
+        if ctx.bDist <= CLASH.MAINT_STOP_RADIUS then
+                if isTargeted() then return true end
+                if (t - S.lastFireAt) < CLASH.MAINT_PARRY_KEEP then return true end
+                if (t - S.lastTargetAt) < CLASH.MAINT_TARGET_KEEP then return true end
+        end
+
+        return false
 end
 
 -- tickMaintenance
@@ -349,16 +360,40 @@ local function tickMaintenance()
         end
 end
 
+-- isBallApproaching
+local function isBallApproaching(hrp, ball)
+        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return true end
+        local toMe = hrp.Position - ball.Position
+        if toMe.Magnitude < 1 then return true end
+        return av:Dot(toMe.Unit) > 0.25
+end
+
 -- shouldDeactivateClash
--- Desativação adaptativa: só os casos fatais.
--- Tudo o que era "bola saiu do raio" virou responsabilidade
--- do detector de retorno: se ela sair e não voltar na janela,
--- o burst não é rearmado e o maintain naturalmente desliga.
 local function shouldDeactivateClash()
         if not S.clashOn then return false end
         local t = _now()
         if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
-        return fatalClashFault(t)
+        if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
+        local lp = Utils.getLocalPlayer()
+        local myChar = lp.Character
+        if not (myChar and myChar.Parent) then return true end
+        local myHum = myChar:FindFirstChildOfClass("Humanoid")
+        if not (myHum and myHum.Parent and myHum.Health > 0) then return true end
+        local ball = GameInfo.getBall()
+        if not (ball and ball.Parent) then return true end
+        local ctx = clashSnapshot()
+        if not ctx then return true end
+        if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return true end
+        local deactRad = math.clamp(P.DEFLECT_R + P.RAD_FLOOR, 18, 30)
+        if ctx.bDist > deactRad then return true end
+        if ctx.tImp > deactTimpMax(ctx.spd) then return true end
+        local hr = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
+                if not isBallApproaching(hr, ctx.ball) and ctx.bDist > 15 then return true end
+        end
+        if ctx.spd < 1 and ctx.bDist > 20 then return true end
+        return false
 end
 
 -- activateBurst
