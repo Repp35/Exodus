@@ -8,7 +8,7 @@ local Probe, GameInfo, Utils
 -- tunning
 local P = {
     FIRE_LOCK = 0.080,
-    MIN_SPD = 3,
+    MIN_SPD = 5,
     DEFLECT_R = 8.5,
     RAD_FLOOR = 14,
     LEAD_CAP = 50,
@@ -322,7 +322,7 @@ local function bindParry(ch)
                 if not (ball and ball.Parent) then
                     return
                 end
-                if tgtOn == nil or not tgtOn(ch) then
+                if not tgtOn(ch) then
                     AP.armed = false
                     return
                 end
@@ -358,6 +358,14 @@ local function bindParry(ch)
                 if dx * dx + dy * dy + dz * dz > parryRad * parryRad then
                     AP.wasInRange, AP.inRangeEnterAt = false, 0
                     return
+                end
+                local _bpVec = hrp.Position - bp
+                local _bpDist = _bpVec.Magnitude
+                if _bpDist > 1e-4 then
+                    local _ok, _av = pcall(function() return ball.AssemblyLinearVelocity end)
+                    if _ok and typeof(_av) == "Vector3" and _av:Dot(_bpVec / _bpDist) < 3 then
+                        return
+                    end
                 end
                 AP.wasInRange = true
                 if AP.fired then
@@ -397,10 +405,13 @@ local function bindParry(ch)
                     end
                     return
                 end
-                if AP.firedAt > Sync.lastSyncAt then
+                if AP.firedAt >= Sync.lastSyncAt then
                     return
                 end
                 if (t - AP.firedAt) < P.FIRE_LOCK then
+                    return
+                end
+                if (t - AP.firedAt) < (P.FIRE_LOCK * 0.5) and AP.burstLeft == 0 then
                     return
                 end
                 GameInfo.accumPingTimer(dt)
