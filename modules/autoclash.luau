@@ -58,25 +58,32 @@ local CLASH = {
         COLD_PING_SCALE          = 0.4,
         FAST_PING_SCALE          = 0.5,
         PREEMPT_PING_SCALE       = 0.4,
-        MAINT_CHECK_INTERVAL     = 0.040,
-        MAINT_HOLD_MIN           = 0.080,
-        MAINT_BALL_RADIUS        = 25,
-        MAINT_TIMP_MAX           = 0.40,
-        MAINT_PARRY_KEEP         = 0.18,
-        MAINT_TARGET_KEEP        = 0.22,
-        MAINT_BALL_GONE_DIST     = 60,
-        MAINT_DEAD_ZONE          = 2.0,
-        MAINT_STOP_RADIUS        = 30,
-        MAINT_BALL_APPROACH_DOT  = -0.20,
+        -- (maintenance thresholds removed; deactivation now derives everything from effectiveRadius)
+        DEACT_GONE_FACTOR        = 1.5,
+        DEACT_NOTARGET_FACTOR   = 1.2,
+        DEACT_STOP_DIST          = 12,
+        DEACT_STOP_SPD           = 3,
+        DEACT_TIMP_FACTOR        = 1.3,
+        DEACT_TIMP_MIN           = 0.08,
+        DEACT_TIMP_MAX           = 0.25,
+        -- Gate vindo do detector de retorno: se passou da janela dinâmica
+        -- (mesma que o detector usa pra detectar retorno) E do piso,
+        -- a bola foi embora de verdade.
+        DEACT_RETURN_FLOOR_MS    = 0.350,
+        -- Tracker de dot leaving: bola visivelmente indo embora por X tempo
+        -- (complemento da regra 1: mede direção, não física prevista)
+        DEACT_DOT_ENTER          = -0.30,  -- dot precisa ser < isto pra começar a contar
+        DEACT_DOT_EXIT           = -0.15,  -- dot precisa ser > isto pra resetar
+        DEACT_DOT_HOLD           = 0.350,  -- tempo sustentado antes de desativar
+        DEACT_DOT_MIN_SPD        = 1.0,    -- abaixo disto, dot é lixo, reseta
         SPAM_PRE_FILL_FRAMES     = 4,
         BURST_ON_MS              = 0.080,
         BURST_OFF_MS             = 0.060,
         DET_RAD_MIN              = 10,
         DET_RAD_MAX              = 25,
         DET_RAD_SPD_REF          = 120,
-        DET_RETURN_FACTOR        = 1.5,
-        DET_DOT_EMA              = 0.42,
-        DET_RETURN_FLOOR         = 0.05,
+        DET_RETURN_FACTOR        = 1.3,
+        DET_DOT_EMA              = 0.25,
         DET_DOT_THRESH           = 0.15,
         DET_TIMEOUT              = 0.8,
         ANTIDASH_RAD_MIN         = 20,
@@ -131,8 +138,8 @@ local S = {
         burstOffStart        = 0,
         burstSignalDuringOn  = false,
         dashAnti             = { untilT = 0, src = nil, at = 0 },
-        lastMaintCheck       = 0,
         lastFireAt           = 0,
+        dotLeaveStart        = -1, -- -1 = inativo; caso contrário timestamp em que dot ficou < DEACT_DOT_ENTER
 }
 
 -- locals
@@ -176,10 +183,12 @@ local function tImpCapFor(spd, base, refSpd, lo, hi)
         return math.clamp(base * s, lo, hi)
 end
 
--- maintTimpMax
 -- deactTimpMax
-local function maintTimpMax(spd) return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.06, 0.40) end
-local function deactTimpMax(spd) return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.08, 0.40) end
+-- tImpMax(spd) = clamp(0.25 / (spd/60), 0.08, 0.25)  -- i.e. larger for slow balls, smaller for fast
+local function deactTimpMax(spd)
+        if spd < 1 then return CLASH.DEACT_TIMP_MAX end
+        return math.clamp(CLASH.DEACT_TIMP_MAX / (spd / 60), CLASH.DEACT_TIMP_MIN, CLASH.DEACT_TIMP_MAX)
+end
 
 -- isTargeted
 local function isTargeted()
@@ -237,10 +246,9 @@ local function tickReturnDetector(t, hr, ball)
                 end
         elseif S.detPhase == "EXITED" then
                 local delta  = t - S.detExitAt
-                local limiar = math.max(S.detEntryTime * CLASH.DET_RETURN_FACTOR, CLASH.DET_RETURN_FLOOR)
-                local voltou = (isInside and not S.detWasInside) or dotComing
-                if voltou then
-                        if delta <= limiar then
+                local limiar = S.detEntryTime * CLASH.DET_RETURN_FACTOR
+                if (isInside and not S.detWasInside) or dotComing then
+                        if delta <= limiar and dotComing then
                                 S.detSignal = true
                         end
                         local entryTime = dist > 0.1 and (dist / spd) or 0.01
@@ -293,74 +301,57 @@ function AutoClash.invalidateSnapshot()
         _ctxCache.valid = false
 end
 
--- maintRadius
-local function maintRadius(spd)
-        local base = math.max(
-                P.DEFLECT_R + GameInfo.preBufferStuds(spd) + (AutoParry and AutoParry.resRadiusBonus() or 0),
-                CLASH.MAINT_BALL_RADIUS
-        )
-        return math.min(base, 55)
-end
-
--- shouldMaintainClash
--- Regra simples: a bola entrou no range de clash, então ela pode
--- voltar a qualquer momento. Mantém o spam até a bola sair do range
--- ou um evento fatal acontecer (morte, bola sumiu, duração máxima).
-local function shouldMaintainClash()
-        if not S.clashOn then return false end
-        local t = _now()
-
-        -- Hold mínimo: nunca corta logo após ativar
-        if (t - S.clashAt) < CLASH.MAINT_HOLD_MIN then return true end
-
-        -- Teto duro de duração
-        if (t - S.clashAt) > CLASH.MAX_HOLD then return false end
-
-        -- Fatais: morreu / bola sumiu / HRP sumiu
-        local lp = Utils.getLocalPlayer()
-        local myChar = lp and lp.Character
-        if not (myChar and myChar.Parent) then return false end
-        local myHum = myChar:FindFirstChildOfClass("Humanoid")
-        if not (myHum and myHum.Parent and myHum.Health > 0) then return false end
-        local ball = GameInfo.getBall()
-        if not (ball and ball.Parent) then return false end
-        local hr = myChar:FindFirstChild("HumanoidRootPart")
-        if not (hr and hr.Parent) then return false end
-
-        -- Se a bola ainda tá dentro do range de ativação (BALL_HARD_CAP),
-        -- spama. Simples assim.
-        local ctx = clashSnapshot()
-        if ctx and ctx.bDist <= CLASH.BALL_HARD_CAP then
-                return true
+-- trackDotLeaving
+-- Retorna true se a bola está visivelmente indo embora há mais de DEACT_DOT_HOLD.
+-- Histerese: precisa de DEACT_DOT_ENTER pra entrar, DEACT_DOT_EXIT pra sair.
+-- Reseta se a bola parar (spd < DEACT_DOT_MIN_SPD) ou se a leitura falhar.
+-- Sentinel: -1 = inativo. Não usa 0 porque colide com t=0 no início do jogo.
+local function trackDotLeaving(ball, hr, t)
+        local function reset() S.dotLeaveStart = -1 end
+        if not (ball and ball.Parent and hr and hr.Parent) then
+                reset()
+                return false
         end
-
-        -- Sem leitura de contexto: mantém por inércia
-        if not ctx then return true end
-
-        -- Bola escapou de vez
-        if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return false end
-
-        -- Bola fora do range duro mas ainda no "stop radius" + alvo
-        -- marcado / parry recente: segura mais um pouco
-        if ctx.bDist <= CLASH.MAINT_STOP_RADIUS then
-                if isTargeted() then return true end
-                if (t - S.lastFireAt) < CLASH.MAINT_PARRY_KEEP then return true end
-                if (t - S.lastTargetAt) < CLASH.MAINT_TARGET_KEEP then return true end
+        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+        if not (ok and typeof(av) == "Vector3" and av.Magnitude > CLASH.DEACT_DOT_MIN_SPD) then
+                reset()
+                return false
         end
+        local toMe = hr.Position - ball.Position
+        local mag = toMe.Magnitude
+        if mag < 0.1 then
+                reset()
+                return false
+        end
+        local dot = av:Dot(toMe.Unit)
 
-        return false
-end
-
--- tickMaintenance
-local function tickMaintenance()
-        if not S.clashOn then return end
-        local t = _now()
-        if (t - S.lastMaintCheck) < CLASH.MAINT_CHECK_INTERVAL then return end
-        S.lastMaintCheck = t
-        if not shouldMaintainClash() then
-                clearClash()
+        if dot < CLASH.DEACT_DOT_ENTER then
+                if S.dotLeaveStart < 0 then
+                        S.dotLeaveStart = t
+                end
+                return (t - S.dotLeaveStart) > CLASH.DEACT_DOT_HOLD
+        elseif dot > CLASH.DEACT_DOT_EXIT then
+                reset()
+                return false
+        else
+                return (S.dotLeaveStart >= 0) and ((t - S.dotLeaveStart) > CLASH.DEACT_DOT_HOLD) or false
         end
 end
+
+-- effectiveRadius
+-- Raio efetivo do parry: tudo que tá dentro ainda é "nosso".
+-- DEFLECT_R + bonus de raio do AutoParry + buffers de velocidade/latência + margem mínima.
+local function effectiveRadius(spd)
+        local parryBonus = (AutoParry and AutoParry.resRadiusBonus and AutoParry.resRadiusBonus() or 0)
+        local ping = (GameInfo.getPing and GameInfo.getPing() or 0)
+        return P.DEFLECT_R
+                + parryBonus
+                + (spd or 0) * 0.05
+                + ping * 0.5
+                + 1.5
+end
+
+-- (shouldMaintainClash / tickMaintenance removidos — shouldDeactivateClash decide tudo, todo frame)
 
 -- isBallApproaching
 local function isBallApproaching(hrp, ball)
@@ -372,29 +363,70 @@ local function isBallApproaching(hrp, ball)
 end
 
 -- shouldDeactivateClash
+-- Roda todo frame, sem hold mínimo, sem maintain. Primeira regra que bater, desativa.
+-- 1.  Gate do detector de retorno: EXITED há mais que (entryTime*1.3, 350ms)
+-- 1.5 Dot leaving sustentado: dot<-0.30 por >350ms (histerese -0.30/-0.15)
+-- 2.  Bola simplesmente longe demais (1.5x effectiveRadius)
+-- 3.  tImp muito alto (bola não chega tão cedo)
+-- 4.  Não sou target + distância moderada
+-- 5.  Bola parada/morta longe
 local function shouldDeactivateClash()
         if not S.clashOn then return false end
+
+        -- Teto duro de duração (mantido como cinto de segurança)
         local t = _now()
-        if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
         if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
+
+        -- Fatais: morreu / HRP sumiu / bola sumiu
         local lp = Utils.getLocalPlayer()
-        local myChar = lp.Character
+        local myChar = lp and lp.Character
         if not (myChar and myChar.Parent) then return true end
         local myHum = myChar:FindFirstChildOfClass("Humanoid")
         if not (myHum and myHum.Parent and myHum.Health > 0) then return true end
         local ball = GameInfo.getBall()
         if not (ball and ball.Parent) then return true end
+        local hr = myChar:FindFirstChild("HumanoidRootPart")
+        if not (hr and hr.Parent) then return true end
+
         local ctx = clashSnapshot()
         if not ctx then return true end
-        if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return true end
-        local deactRad = math.clamp(P.DEFLECT_R + P.RAD_FLOOR, 18, 30)
-        if ctx.bDist > deactRad then return true end
-        if ctx.tImp > deactTimpMax(ctx.spd) then return true end
-        local hr = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-        if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
-                if not isBallApproaching(hr, ctx.ball) and ctx.bDist > 15 then return true end
+
+        local dist = ctx.bDist
+        local spd  = ctx.spd or 0
+        local rad  = effectiveRadius(spd)
+
+        -- 1. Gate do detector de retorno: mesma lógica da ativação.
+        -- Se a bola saiu do raio (EXITED) e já passou da janela dinâmica
+        -- (detEntryTime * DET_RETURN_FACTOR) + piso de 350ms sem voltar,
+        -- não é mais clash. Usa a física que a ativação já validou.
+        if S.detPhase == "EXITED" then
+                local window = (S.detEntryTime or 0) * CLASH.DET_RETURN_FACTOR
+                local elapsed = t - S.detExitAt
+                local threshold = math.max(window, CLASH.DEACT_RETURN_FLOOR_MS)
+                if elapsed > threshold then
+                        return true
+                end
         end
-        if ctx.spd < 1 and ctx.bDist > 20 then return true end
+
+        -- 1.5. Dot leaving sustentado: bola visivelmente indo embora por > 350ms.
+        -- Complemento da regra 1: mede direção observada, não física prevista.
+        -- Histerese: precisa de dot < -0.30 pra entrar, > -0.15 pra sair.
+        if trackDotLeaving(ctx.ball, hr, t) then
+                return true
+        end
+
+        -- 2. Longe demais, ponto.
+        if dist > rad * CLASH.DEACT_GONE_FACTOR then return true end
+
+        -- 3. tImp muito alto (bola não chega tão cedo)
+        if ctx.tImp > deactTimpMax(spd) * CLASH.DEACT_TIMP_FACTOR then return true end
+
+        -- 4. Não sou target + distância moderada
+        if not isTargeted() and dist > rad * CLASH.DEACT_NOTARGET_FACTOR then return true end
+
+        -- 5. Bola parada/morta longe
+        if spd < CLASH.DEACT_STOP_SPD and dist > CLASH.DEACT_STOP_DIST then return true end
+
         return false
 end
 
@@ -410,7 +442,6 @@ local function activateBurst(t, Config)
         S.clashOffAt          = 0
         S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, false
         S.tImpRiseHist        = { 0, 0, 0 }
-        S.lastMaintCheck      = t
         local c = math.max(tonumber(Config.CPS) or Utils.defaultCps(), 1)
         _spamDebt  = (1 / c) * CLASH.SPAM_PRE_FILL_FRAMES
         _burstActiveShared = false
@@ -485,14 +516,13 @@ local function evaluateClash(t, hr, ball, Config)
         end
 
         -- Se clash está on, só o burst renova o hold
-        -- O maintain segura o clash via shouldMaintainClash
+        -- (sem maintain: shouldDeactivateClash já correu acima e decide tudo)
         if S.clashOn then
                 -- Burst em ON: renova se houver sinal
                 if S.burstState == "ON" then
                         if S.detSignal then
                                 S.burstSignalDuringOn = true
                         end
-                        -- Não vai pro OFF: deixa o maintain decidir
                         -- Só renova o hold se houver sinal
                         if S.burstSignalDuringOn then
                                 S.burstOnStart        = t
@@ -755,7 +785,6 @@ function AutoClash.evaluate(t, hr, ball, Config)
         evaluateClash(t, hr, ball, Config)
 end
 
-function AutoClash.tickMaintenance()      tickMaintenance() end
 function AutoClash.updateDashTrack(t)     updateDashTrack(t, Utils.getPlayers()) end
 function AutoClash.installAntiDashHooks() installAntiDashHooks(Utils.getPlayers()) end
 function AutoClash.getState()             return S end
@@ -768,7 +797,7 @@ function AutoClash.resetState()
         S.clashOn, S.clashAt, S.clashHoldUntil, S.clashOffAt, S.lastClashReact = false, 0, 0, 0, 0
         S.dangerEma, S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, 0, false
         S.tImpRiseHist = { 0, 0, 0 }
-        S.targetRingIdx, S.targetCps, S.lastMaintCheck = 0, 0, 0
+        S.targetRingIdx, S.targetCps = 0, 0
         S.lastFireAt = 0
         for i = 1, RING_BUF do
                 S.targetRing[i] = 0
@@ -779,6 +808,7 @@ function AutoClash.resetState()
         S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
         S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
         S.dashAnti = { untilT = 0, src = nil, at = 0 }
+        S.dotLeaveStart = -1
         _ctxCache.valid = false
 end
 
