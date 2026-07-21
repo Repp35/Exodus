@@ -134,12 +134,6 @@ Spam.setup(deps)
 Spam.bindAutoClash(AutoClash)
 AutoParry.setOnFired(
     function(t)
-        AutoClash.notifyFired(t)
-    end
-)
-AutoClash.setBurstSink(
-    function()
-        Spam.resetBurst()
     end
 )
 
@@ -275,7 +269,6 @@ local function bindChar(ch)
                 AutoClash.updateDashTrack(t)
                 local ball = GameInfo.getBall()
                 AutoClash.evaluate(t, hrp, ball, Config)
-                AutoClash.tickMaintenance()
                 AutoClash.invalidateSnapshot()
                 Spam.tick(dt)
                 GameInfo.sampleFrameDelta(dt)
