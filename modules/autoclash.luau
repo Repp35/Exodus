@@ -192,6 +192,7 @@ end
 
 -- isTargeted
 local function isTargeted()
+        if not (GameInfo and GameInfo.isTargeted) then return false end
         return GameInfo.isTargeted(S.lastTarget)
 end
 
@@ -273,20 +274,27 @@ local function clashSnapshot()
                 return nil
         end
         updateTargetCps(t, CLASH.RING_FRESH_MAX)
-        local ball = GameInfo.getBall()
+        local ball = GameInfo.getBall and GameInfo.getBall()
         if not (ball and ball.Parent) then
                 _ctxCache.valid = false
                 return nil
         end
-        local nearest, nearestAlive = GameInfo.nearestPlayerAlive()
+        local nearest, nearestAlive
+        if GameInfo.nearestPlayerAlive then
+                nearest, nearestAlive = GameInfo.nearestPlayerAlive()
+        else
+                nearest, nearestAlive = math.huge, false
+        end
         local bp = ball.Position
         local bDist = (hr.Position - bp).Magnitude
         local panic = nearestAlive and (nearest <= CLASH.PANIC_DIST and bDist <= CLASH.PANIC_BALL)
-        local live = GameInfo.liveTImp()
-        local tImp, spd = live.tImp, live.spd
+        local live = GameInfo.liveTImp and GameInfo.liveTImp() or nil
+        local tImp, spd = (live and live.tImp) or 0, (live and live.spd) or 0
         if spd < 1 then
-                local ti, _, s2 = GameInfo.computeTImp(hr, ball, t)
-                tImp, spd = ti, s2
+                if GameInfo.computeTImp then
+                        local ti, _, s2 = GameInfo.computeTImp(hr, ball, t)
+                        tImp, spd = ti, s2
+                end
         end
         _ctxCache.t, _ctxCache.valid = t, true
         _ctxCache.hr = hr
