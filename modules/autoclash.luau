@@ -124,7 +124,10 @@ local function deactTimpMax(spd)
 end
 
 local function isTargeted()
-        return GameInfo and GameInfo.isTargeted and GameInfo.isTargeted(S.lastTarget) or false
+        local fn = GameInfo and GameInfo.isTargeted
+        if type(fn) ~= "function" then return false end
+        local ok, v = pcall(fn, S.lastTarget)
+        return ok and v or false
 end
 
 local function clearClash()
@@ -137,19 +140,26 @@ local function getDetectorRadius(spd)
 end
 
 local function getParryBonus()
-        if not (AutoParry and AutoParry.resRadiusBonus) then return 0 end
-        local ok, v = pcall(AutoParry.resRadiusBonus)
+        local fn = AutoParry and AutoParry.resRadiusBonus
+        if type(fn) ~= "function" then return 0 end
+        local ok, v = pcall(fn)
         return ok and (tonumber(v) or 0) or 0
 end
 
 local function getAutoParryState()
-        if not (AutoParry and AutoParry.getState) then return nil end
-        local ok, st = pcall(AutoParry.getState)
+        local fn = AutoParry and AutoParry.getState
+        if type(fn) ~= "function" then return nil end
+        local ok, st = pcall(fn)
         return ok and st or nil
 end
 
 local function effectiveRadius(spd)
-        local ping = (GameInfo and GameInfo.getPing and GameInfo.getPing() or 0)
+        local ping = 0
+        local fnPing = GameInfo and GameInfo.getPing
+        if type(fnPing) == "function" then
+                local ok, p = pcall(fnPing)
+                if ok then ping = tonumber(p) or 0 end
+        end
         return P.DEFLECT_R
                 + getParryBonus()
                 + (spd or 0) * P.SPD_FACTOR
@@ -158,8 +168,9 @@ local function effectiveRadius(spd)
 end
 
 local function getBall()
-        if not (GameInfo and GameInfo.getBall) then return nil end
-        local ok, b = pcall(GameInfo.getBall)
+        local fn = GameInfo and GameInfo.getBall
+        if type(fn) ~= "function" then return nil end
+        local ok, b = pcall(fn)
         return ok and b or nil
 end
 
@@ -249,23 +260,28 @@ local function clashSnapshot()
                 return nil
         end
         local nearest, nearestAlive = math.huge, false
-        if GameInfo and GameInfo.nearestPlayerAlive then
-                local okN, n, a = pcall(GameInfo.nearestPlayerAlive)
+        local fnNear = GameInfo and GameInfo.nearestPlayerAlive
+        if type(fnNear) == "function" then
+                local okN, n, a = pcall(fnNear)
                 if okN then nearest, nearestAlive = n, a end
         end
         local bp = ball.Position
         local bDist = (hr.Position - bp).Magnitude
         local panic = nearestAlive and (nearest <= 9 and bDist <= 13)
         local tImp, spd = 0, 0
-        if GameInfo and GameInfo.liveTImp then
-                local okL, live = pcall(GameInfo.liveTImp)
+        local fnLive = GameInfo and GameInfo.liveTImp
+        if type(fnLive) == "function" then
+                local okL, live = pcall(fnLive)
                 if okL and live then
                         tImp, spd = live.tImp or 0, live.spd or 0
                 end
         end
-        if spd < 1 and GameInfo and GameInfo.computeTImp then
-                local okC, ti, _, s2 = pcall(GameInfo.computeTImp, hr, ball, t)
-                if okC then tImp, spd = ti, s2 end
+        if spd < 1 then
+                local fnComp = GameInfo and GameInfo.computeTImp
+                if type(fnComp) == "function" then
+                        local okC, ti, _, s2 = pcall(fnComp, hr, ball, t)
+                        if okC then tImp, spd = ti, s2 end
+                end
         end
         _ctxCache.t, _ctxCache.valid = t, true
         _ctxCache.hr = hr
@@ -354,12 +370,13 @@ local function onTarget(newTarget, t)
         local hr = getMyHRP()
         local ball = getBall()
         if not (hr and hr.Parent and ball and ball.Parent) then return end
-        if not (GameInfo and GameInfo.ballPos and GameInfo.ballSpeed and GameInfo.tImpCompensated) then return end
-        local okP, bp = pcall(GameInfo.ballPos, ball, t)
-        local okS, speed = pcall(GameInfo.ballSpeed, ball, t)
+        local fnBP, fnBS, fnTIC = GameInfo.ballPos, GameInfo.ballSpeed, GameInfo.tImpCompensated
+        if type(fnBP) ~= "function" or type(fnBS) ~= "function" or type(fnTIC) ~= "function" then return end
+        local okP, bp = pcall(fnBP, ball, t)
+        local okS, speed = pcall(fnBS, ball, t)
         if not (okP and okS) then return end
         local bDist = (hr.Position - bp).Magnitude
-        local impactTime = speed > 1 and GameInfo.tImpCompensated(bDist, speed) or math.huge
+        local impactTime = speed > 1 and fnTIC(bDist, speed) or math.huge
         if bDist <= CLASH.BALL_HARD_CAP
                 and impactTime <= CLASH.OFF_FAST
                 and (t - S.lastClashReact) >= CLASH.REACT_CD
@@ -371,7 +388,7 @@ end
 
 -- evaluate
 local function evaluateClash(t, hr, ball, Config)
-        if Config.AutoClash == false or _G.PhantomManual then
+        if not Config or Config.AutoClash == false or _G.PhantomManual then
                 if S.clashOn then clearClash() end
                 S.burstState, S.burstSignalDuringOn = "IDLE", false
                 return
