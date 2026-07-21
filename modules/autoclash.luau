@@ -75,7 +75,8 @@ local CLASH = {
         DET_RAD_MAX              = 25,
         DET_RAD_SPD_REF          = 120,
         DET_RETURN_FACTOR        = 1.3,
-        DET_DOT_EMA              = 0.25,
+        DET_DOT_EMA              = 0.42,
+        DET_RETURN_FLOOR         = 0.05,
         DET_DOT_THRESH           = 0.15,
         DET_TIMEOUT              = 0.8,
         ANTIDASH_RAD_MIN         = 20,
@@ -236,9 +237,10 @@ local function tickReturnDetector(t, hr, ball)
                 end
         elseif S.detPhase == "EXITED" then
                 local delta  = t - S.detExitAt
-                local limiar = S.detEntryTime * CLASH.DET_RETURN_FACTOR
-                if (isInside and not S.detWasInside) or dotComing then
-                        if delta <= limiar and dotComing then
+                local limiar = math.max(S.detEntryTime * CLASH.DET_RETURN_FACTOR, CLASH.DET_RETURN_FLOOR)
+                local voltou = (isInside and not S.detWasInside) or dotComing
+                if voltou then
+                        if delta <= limiar then
                                 S.detSignal = true
                         end
                         local entryTime = dist > 0.1 and (dist / spd) or 0.01
