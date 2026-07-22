@@ -278,7 +278,25 @@ local function clashSnapshot()
 end
 
 -- deactivation
--- Fix cirúrgico: não desliga se a bola ainda está vindo, mesmo com tImp baixo
+-- trackDotLeaving: dot < 0 mantido por X ms = "bola realmente indo embora"
+local function isBallGoingAway(hrp, ball)
+        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return false end
+        local toMe = hrp.Position - ball.Position
+        if toMe.Magnitude < 1 then return false end
+        return av:Dot(toMe.Unit) < -0.1
+end
+
+local function tickDotLeave(t, hr, ball)
+        if isBallGoingAway(hr, ball) then
+                S.dotLeaveStart = S.dotLeaveStart or t
+                return (t - S.dotLeaveStart) > 0.10
+        else
+                S.dotLeaveStart = nil
+                return false
+        end
+end
+
 local function isBallApproaching(hrp, ball)
         local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
         if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return true end
@@ -304,13 +322,21 @@ local function shouldDeactivateClash()
         -- Janela dinâmica por velocidade
         local limit = math.max(CLASH.OFF_FAST, CLASH.OFF_BASE * (CLASH.SPD_REF / math.max(spd, 1)))
 
-        -- 1. tImp estourou a janela E bola não está mais vindo -> desliga
-        if tImp > limit and not isBallApproaching(hr, ball) then
+        -- 1. Bola muito perto (parry é oq importa)
+        if ctx.bDist < 6 then return true end
+
+        -- 2. tImp estourou a janela E bola claramente indo embora há 100ms
+        if tImp > limit and tickDotLeave(t, hr, ball) then
                 return true
         end
 
-        -- 2. Bola escapou de vez
+        -- 3. Bola escapou de vez
         if ctx.bDist > 40 then return true end
+
+        -- 4. Distância razoável E bola indo embora confirmado (100ms)
+        if ctx.bDist > 18 and tickDotLeave(t, hr, ball) then
+                return true
+        end
 
         return false
 end
