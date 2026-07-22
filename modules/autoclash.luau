@@ -9,7 +9,9 @@ local CLASH = {
         REACT_CD                 = 0.120,
         CPS_WIN                  = 1.0,
         CPS_THRESH               = 8,
-        OFF_FAST                 = 0.050,
+        OFF_FAST                 = 0.050,  -- piso mínimo (teto da janela curta)
+        OFF_BASE                 = 0.090,  -- referência do tImp limite a SPD_REF
+        SPD_REF                  = 60,     -- velocidade de referência
         MAX_HOLD                 = 1.2,
         TARGET_GRACE             = 0.15,
         BURST_ON_MS              = 0.080,
@@ -18,9 +20,9 @@ local CLASH = {
         DET_RAD_MIN              = 10,
         DET_RAD_MAX              = 25,
         DET_RAD_SPD_REF          = 120,
-        DET_DOT_EMA              = 0.25,
-        DET_DOT_THRESH           = 0.15,
-        DET_RETURN_FACTOR        = 1.3,
+        DET_DOT_EMA              = 0.40,
+        DET_DOT_THRESH           = 0.35,
+        DET_RETURN_FACTOR        = 1.5,
         DET_TIMEOUT              = 0.8,
         DASH_SPD_THRESH          = 50,
         DASH_SPD_CONFIRM         = 62,
@@ -120,11 +122,6 @@ local function updateTargetCps(t)
         S.targetCps = cnt / CLASH.CPS_WIN
 end
 
-local function deactTimpMax(spd)
-        if spd < 1 then return CLASH.DEACT_TIMP_MAX end
-        return math.clamp(CLASH.DEACT_TIMP_MAX / (spd / 60), CLASH.DEACT_TIMP_MIN, CLASH.DEACT_TIMP_MAX)
-end
-
 local function isTargeted()
         local fn = GameInfo and GameInfo.isTargeted
         if type(fn) ~= "function" then return false end
@@ -153,20 +150,6 @@ local function getAutoParryState()
         if type(fn) ~= "function" then return nil end
         local ok, st = pcall(fn)
         return ok and st or nil
-end
-
-local function effectiveRadius(spd)
-        local ping = 0
-        local fnPing = GameInfo and GameInfo.getPing
-        if type(fnPing) == "function" then
-                local ok, p = pcall(fnPing)
-                if ok then ping = tonumber(p) or 0 end
-        end
-        return P.DEFLECT_R
-                + getParryBonus()
-                + (spd or 0) * P.SPD_FACTOR
-                + ping * P.PING_FACTOR
-                + P.MIN_MARGIN
 end
 
 local function getBall()
@@ -294,28 +277,7 @@ local function clashSnapshot()
         return _ctxCache
 end
 
--- deactivation
-local function trackDotLeaving(ball, hr, t)
-        local function reset() S.dotLeaveStart = -1 end
-        if not (ball and ball.Parent and hr and hr.Parent) then
-                reset(); return false
-        end
-        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-        if not (ok and typeof(av) == "Vector3") or av.Magnitude <= CLASH.DEACT_DOT_MIN_SPD then
-                reset(); return false
-        end
-        local toMe = hr.Position - ball.Position
-        if toMe.Magnitude < 0.1 then reset(); return false end
-        local dot = av:Dot(toMe.Unit)
-        if dot < CLASH.DEACT_DOT_ENTER then
-                if S.dotLeaveStart < 0 then S.dotLeaveStart = t end
-                return (t - S.dotLeaveStart) > CLASH.DEACT_DOT_HOLD
-        elseif dot > CLASH.DEACT_DOT_EXIT then
-                reset(); return false
-        end
-        return S.dotLeaveStart >= 0 and ((t - S.dotLeaveStart) > CLASH.DEACT_DOT_HOLD) or false
-end
-
+-- deactivation (v9-style: tImp dinâmico baseado em UM piso + velocidade)
 local function shouldDeactivateClash()
         if not S.clashOn then return false end
         local t = _now()
@@ -327,35 +289,18 @@ local function shouldDeactivateClash()
         if not (hr and hr.Parent) then return true end
         local ctx = clashSnapshot()
         if not ctx then return true end
-        local dist = ctx.bDist
         local spd  = ctx.spd or 0
-        local rad  = effectiveRadius(spd)
+        local tImp = ctx.tImp or 0
 
-        local wantDeact = false
+        -- UM piso (OFF_BASE) escalando inversamente com a velocidade
+        -- spd alta  -> janela curta
+        -- spd baixa -> janela longa
+        -- OFF_FAST é o teto mínimo (não deixa fechar demais)
+        local limit = math.max(CLASH.OFF_FAST, CLASH.OFF_BASE * (CLASH.SPD_REF / math.max(spd, 1)))
 
-        -- Critério 1: Bola escapou de vez (muito longe)
-        if dist > rad * 2.0 then wantDeact = true end
+        if tImp > limit then return true end
 
-        -- Critério 2: Bola saiu do raio e não retornou na janela de retorno
-        if S.detPhase == "EXITED" then
-                local returnWindow = (S.detEntryTime or 0) * CLASH.DET_RETURN_FACTOR
-                local elapsed = t - S.detExitAt
-                if elapsed > returnWindow then wantDeact = true end
-        end
-
-        if not wantDeact then
-                S.targetGraceAt = 0
-                return false
-        end
-
-        -- Algum critério pediu pra desativar. Se ainda sou o target, espera o grace.
-        if isTargeted() then
-                if S.targetGraceAt == 0 then S.targetGraceAt = t end
-                if (t - S.targetGraceAt) < CLASH.TARGET_GRACE then
-                        return false
-                end
-        end
-        return true
+        return false
 end
 
 -- burst
