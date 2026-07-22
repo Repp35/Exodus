@@ -277,7 +277,16 @@ local function clashSnapshot()
         return _ctxCache
 end
 
--- deactivation (v9-style: tImp dinâmico baseado em UM piso + velocidade)
+-- deactivation
+-- Fix cirúrgico: não desliga se a bola ainda está vindo, mesmo com tImp baixo
+local function isBallApproaching(hrp, ball)
+        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return true end
+        local toMe = hrp.Position - ball.Position
+        if toMe.Magnitude < 1 then return true end
+        return av:Dot(toMe.Unit) > 0.2
+end
+
 local function shouldDeactivateClash()
         if not S.clashOn then return false end
         local t = _now()
@@ -292,13 +301,16 @@ local function shouldDeactivateClash()
         local spd  = ctx.spd or 0
         local tImp = ctx.tImp or 0
 
-        -- UM piso (OFF_BASE) escalando inversamente com a velocidade
-        -- spd alta  -> janela curta
-        -- spd baixa -> janela longa
-        -- OFF_FAST é o teto mínimo (não deixa fechar demais)
+        -- Janela dinâmica por velocidade
         local limit = math.max(CLASH.OFF_FAST, CLASH.OFF_BASE * (CLASH.SPD_REF / math.max(spd, 1)))
 
-        if tImp > limit then return true end
+        -- 1. tImp estourou a janela E bola não está mais vindo -> desliga
+        if tImp > limit and not isBallApproaching(hr, ball) then
+                return true
+        end
+
+        -- 2. Bola escapou de vez
+        if ctx.bDist > 40 then return true end
 
         return false
 end
@@ -312,7 +324,7 @@ local function activateBurst(t, Config)
         S.clashAt             = t
         S.clashHoldUntil      = t + CLASH.BURST_ON_MS
         S.lastClashReact      = t
-        S.dotLeaveStart       = -1
+        S.dotLeaveStart       = nil
         if _G.PhantomOnBurst then pcall(_G.PhantomOnBurst) end
 end
 
