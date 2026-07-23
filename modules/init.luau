@@ -137,6 +137,14 @@ AutoParry.setOnFired(
     end
 )
 
+-- AutoClash dispara isso quando quer clicar de verdade.
+-- Sem isso, activateBurst sobe o estado mas nunca chama o remote.
+_G.PhantomOnBurst = function()
+    if AutoParry and AutoParry.fire then
+        AutoParry.fire()
+    end
+end
+
 -- keybinds
 local keyConn, keyHoldConn, installedKeySignature
 local function currentKeySignature()
