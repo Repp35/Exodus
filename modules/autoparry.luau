@@ -43,6 +43,7 @@ local AP = {
     inRangeEnterAt = 0,
     lastValidSync = 0,
     lastValidBall = 0,
+    lastMissAt = 0,
 }
 
 -- RES
@@ -103,6 +104,15 @@ local function tickResilience(t)
             end
         end
     end
+end
+
+-- getDeflectCD (delegates to GameInfo, which auto-resolves the Deflect ability ref)
+local function getDeflectCD()
+    if GameInfo and GameInfo.getDeflectCD then
+        local ok, v = pcall(GameInfo.getDeflectCD)
+        if ok and type(v) == "number" then return v end
+    end
+    return 0
 end
 
 -- validRemote (mirror of v22.1 guard)
@@ -182,6 +192,7 @@ end
 local function resetState()
     AP.armed, AP.fired, AP.firedAt = false, false, 0
     AP.inRangeEnterAt, AP.wasInRange = 0, false
+    AP.lastMissAt = 0
     RES.stack = 0
     RES.lastFireBallRef = nil
     RES.lastFireBallAt = 0
@@ -349,14 +360,20 @@ local function bindParry(ch)
                     return
                 end
                 AP.wasInRange = true
+                -- >>> fonte da verdade: cooldown real da ability
+                -- espera o cooldown real zerar antes de tentar de novo (acerto OU miss)
+                local realCD = getDeflectCD()
+                if realCD > 0 then
+                    return
+                end
+                -- lock curto anti-double-fire (mesmo tick)
                 if AP.fired then
-                    -- Já clicou nessa rajada, não clica de novo até o target mudar.
                     if (t - AP.firedAt) < P.FIRE_LOCK then
                         return
                     end
-                    -- Sem burst no Exodus: deixa o guard de tempo cuidar.
-                    -- O reset de AP.fired vem do onBallSync quando o target muda.
-                    return
+                    -- passou o FIRE_LOCK e cooldown real zerou => libera
+                    AP.fired = false
+                    AP.lastMissAt = t
                 end
                 if AP.firedAt > Sync.lastSyncAt then
                     return
@@ -372,6 +389,7 @@ local function bindParry(ch)
                     AP.fired, AP.firedAt = true, t
                 else
                     AP.fired = false
+                    AP.lastMissAt = t
                 end
             end
         )
@@ -438,3 +456,263 @@ function AutoParry.getP()
 end
 
 return AutoParry
+                        burstActivate(t)
+                elseif (t - S.burstOffStart) >= CLASH.BURST_OFF_MS then
+                        S.burstState = "IDLE"
+                end
+        end
+end
+
+-- dash track
+local function updateDashTrack(t)
+        local Players = getPlayers()
+        if not Players then return end
+
+        if (t - _lastDashTrack) < CLASH.DASH_TRACK_INTERVAL then return end
+        _lastDashTrack = t
+
+        local lp = Utils.getLocalPlayer()
+        local ch = lp and lp.Character
+        local myHRP = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not (myHRP and myHRP.Parent) then
+                table.clear(S.dashEvents)
+                return
+        end
+        local myPos = myHRP.Position
+
+        local fullScan = (t - _lastFullPlayerScan) >= CLASH.FULL_PLAYER_SCAN_INTERVAL
+        local playersToCheck = {}
+        if fullScan then
+                _lastFullPlayerScan = t
+                for _, p in Players:GetPlayers() do
+                        if p ~= lp then table.insert(playersToCheck, p) end
+                end
+        else
+                local seen = {}
+                for _, p in Players:GetPlayers() do
+                        if p == lp then continue end
+                        seen[p.UserId] = true
+                        if S.dashEvents[p.UserId] then
+                                table.insert(playersToCheck, p)
+                        else
+                                local pch = p.Character
+                                local php = pch and pch:FindFirstChild("HumanoidRootPart")
+                                if php and php.Parent and (myPos - php.Position).Magnitude <= CLASH.PLAYER_SCAN_RADIUS then
+                                        table.insert(playersToCheck, p)
+                                end
+                        end
+                end
+                for uid in pairs(S.dashEvents) do
+                        if not seen[uid] then
+                                local p = Players:GetPlayerByUserId(uid)
+                                if p then table.insert(playersToCheck, p) end
+                        end
+                end
+        end
+
+        local processed = {}
+        for _, p in ipairs(playersToCheck) do
+                if processed[p.UserId] then continue end
+                processed[p.UserId] = true
+                local pch = p.Character
+                local php = pch and pch:FindFirstChild("HumanoidRootPart")
+                local hum = pch and pch:FindFirstChildOfClass("Humanoid")
+                local alive = php and php.Parent and hum and hum.Parent and hum.Health > 0
+                if not alive then
+                        S.dashEvents[p.UserId] = nil
+                        continue
+                end
+
+                local ok, av = pcall(function() return php.AssemblyLinearVelocity end)
+                if not (ok and typeof(av) == "Vector3") then
+                        S.dashEvents[p.UserId] = nil
+                        continue
+                end
+                local spd = av.Magnitude
+                local ev = S.dashEvents[p.UserId]
+
+                if spd >= CLASH.DASH_SPD_THRESH then
+                        local dir = spd > 0.1 and av.Unit or nil
+                        if not ev then
+                                S.dashEvents[p.UserId] = { spd = spd, dir = dir, at = t, startedAt = t, confirmed = false }
+                        else
+                                ev.spd, ev.dir, ev.at = spd, dir, t
+                                if not ev.confirmed and spd >= CLASH.DASH_SPD_CONFIRM then
+                                        ev.confirmed, ev.startedAt = true, t
+                                end
+                        end
+                elseif ev and ev.confirmed and spd >= CLASH.DASH_SPD_RELEASE then
+                        ev.spd, ev.at = spd, t
+                else
+                        S.dashEvents[p.UserId] = nil
+                end
+        end
+
+        for uid in pairs(S.dashEvents) do
+                if not processed[uid] then S.dashEvents[uid] = nil end
+        end
+
+        for uid, ev in pairs(S.dashEvents) do
+                if not (ev and ev.confirmed and ev.dir and ev.spd) then continue end
+                local dur = ev.at - ev.startedAt
+                if dur > CLASH.DASH_DUR_MAX then
+                        S.dashEvents[uid] = nil
+                        continue
+                end
+                local pl = Players:GetPlayerByUserId(uid)
+                local php = pl and pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
+                if not (php and php.Parent) then
+                        S.dashEvents[uid] = nil
+                elseif dur >= CLASH.DASH_DUR_MIN then
+                        local toMe = myPos - php.Position
+                        local dist = toMe.Magnitude
+                        if dist > 0.1 and dist <= CLASH.DASH_PANIC_DIST then
+                                local dot = ev.dir:Dot(toMe.Unit)
+                                if dot >= CLASH.DASH_PANIC_DOT and ev.spd >= CLASH.DASH_SPD_CONFIRM then
+                                        S.dashPanicUntil = math.max(S.dashPanicUntil, t + CLASH.DASH_PANIC_WINDOW)
+                                end
+                        end
+                end
+        end
+end
+
+-- anti-dash
+local function reportDash(player)
+        if not (player and Utils) then return end
+        local lp = Utils.getLocalPlayer()
+        if player == lp then return end
+        if not (_G.PhantomState and _G.PhantomState.active) then return end
+
+        local t = _now()
+        if _antidashCooldown[player.UserId] and (t - _antidashCooldown[player.UserId]) < CLASH.ANTIDASH_COOLDOWN then return end
+        _antidashCooldown[player.UserId] = t
+
+        local ch = player.Character
+        if not (ch and ch.Parent) then return end
+        local php = ch:FindFirstChild("HumanoidRootPart")
+        local myHRP = getMyHRP()
+        if not (php and php.Parent and myHRP and myHRP.Parent) then return end
+
+        local rad = math.clamp(
+                P.DEFLECT_R + getParryBonus() + CLASH.ANTIDASH_BONUS,
+                CLASH.ANTIDASH_RAD_MIN,
+                CLASH.ANTIDASH_RAD_MAX
+        )
+        local toMe = myHRP.Position - php.Position
+        local dist = toMe.Magnitude
+        if dist > rad or dist < 0.1 then return end
+
+        local dot = 1
+        local ok, av = pcall(function() return php.AssemblyLinearVelocity end)
+        if ok and typeof(av) == "Vector3" and av.Magnitude > 1 then
+                dot = av.Unit:Dot(toMe.Unit)
+        end
+        if dot < CLASH.ANTIDASH_DOT_MIN then return end
+
+        local untilT = math.min(t + CLASH.ANTIDASH_PANIC_MAX, t + CLASH.ANTIDASH_PANIC_HOLD)
+        S.dashAnti.untilT = math.max(S.dashAnti.untilT, untilT)
+        S.dashAnti.src    = player
+end
+
+local function isDashAnimation(track)
+        if not track or not track.Animation then return false end
+        local n  = (track.Name or ""):lower()
+        local an = (track.Animation.Name or ""):lower()
+        return n:find("dash", 1, true) ~= nil or an:find("dash", 1, true) ~= nil
+end
+
+local function _hookPlayerAntiDash(player)
+        if not player or not Utils then return end
+        if player == Utils.getLocalPlayer() then return end
+        if _antidashHooked[player] then return end
+        _antidashHooked[player] = true
+
+        local function attach(char)
+                if not char then return end
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if not hum then return end
+                local anim = hum:FindFirstChildOfClass("Animator") or hum:WaitForChild("Animator", 5)
+                if not anim then return end
+                for _, tr in ipairs(anim:GetPlayingAnimationTracks()) do
+                        if isDashAnimation(tr) then reportDash(player); break end
+                end
+                anim.AnimationPlayed:Connect(function(track)
+                        if isDashAnimation(track) then reportDash(player) end
+                end)
+        end
+
+        if player.Character then attach(player.Character) end
+        player.CharacterAdded:Connect(attach)
+end
+
+local function installAntiDashHooks()
+        local Players = getPlayers()
+        if not Players then return end
+        for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= Utils.getLocalPlayer() then _hookPlayerAntiDash(p) end
+        end
+        Players.PlayerAdded:Connect(function(p)
+                if p ~= Utils.getLocalPlayer() then _hookPlayerAntiDash(p) end
+        end)
+        Players.PlayerRemoving:Connect(function(p)
+                _antidashHooked[p] = nil
+                _antidashCooldown[p.UserId] = nil
+                S.dashEvents[p.UserId] = nil
+        end)
+end
+
+-- api
+function AutoClash.setup(deps)
+        deps = deps or {}
+        GameInfo  = deps.GameInfo
+        Utils     = deps.Utils
+        AutoParry = deps.AutoParry
+
+        local ok, lp = pcall(Utils.getLocalPlayer)
+        _localUserId = (ok and lp and lp.UserId) or -1
+
+        _G.PhantomClashOn    = function() return S.clashOn end
+        _G.PhantomOnTarget   = onTarget
+        _G.PhantomOnTeleport = clearClash
+end
+
+function AutoClash.evaluate(t, hr, ball, Config)
+        evaluateClash(t, hr, ball, Config)
+end
+
+function AutoClash.updateDashTrack(t)
+        updateDashTrack(t)
+end
+
+function AutoClash.installAntiDashHooks()
+        installAntiDashHooks()
+end
+
+function AutoClash.getState()   return S end
+function AutoClash.clashOn()    return S.clashOn end
+function AutoClash.getClashAt() return S.clashAt end
+function AutoClash.snapshot()             return nil end
+function AutoClash.invalidateSnapshot()   end
+
+function AutoClash.resetState()
+        S.lastTarget        = -999
+        S.wasTargeted       = false
+        S.clashOn, S.clashAt, S.clashHoldUntil, S.lastClashReact = false, 0, 0, 0
+        table.clear(S.dashEvents)
+        S.dashPanicUntil    = 0
+        S.detPhase          = "IDLE"
+        S.detEnterAt        = 0
+        S.detEntryTime      = 0
+        S.detExitAt         = 0
+        S.detDotEma         = 0
+        S.detWasInside      = false
+        S.detSignal         = false
+        S.burstState        = "IDLE"
+        S.burstOnStart      = 0
+        S.burstOffStart     = 0
+        S.burstSignalDuringOn = false
+        S.dashAnti          = { untilT = 0, src = nil }
+        S.dotNegStart       = nil
+end
+
+return AutoClash
