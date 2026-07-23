@@ -7,16 +7,10 @@ local CLASH = {
         BALL_HARD_CAP            = 22,
         HOLD                     = 0.20,
         REACT_CD                 = 0.120,
-        CPS_WIN                  = 1.0,
-        CPS_THRESH               = 8,
-        OFF_FAST                 = 0.050,  -- piso mínimo (teto da janela curta)
-        OFF_BASE                 = 0.090,  -- referência do tImp limite a SPD_REF
-        SPD_REF                  = 60,     -- velocidade de referência
+        OFF_FAST                 = 0.050,
         MAX_HOLD                 = 1.2,
-        TARGET_GRACE             = 0.15,
         BURST_ON_MS              = 0.080,
         BURST_OFF_MS             = 0.060,
-        SPAM_PRE_FILL_FRAMES     = 4,
         DET_RAD_MIN              = 10,
         DET_RAD_MAX              = 25,
         DET_RAD_SPD_REF          = 120,
@@ -41,41 +35,23 @@ local CLASH = {
         ANTIDASH_PANIC_HOLD      = 0.45,
         ANTIDASH_PANIC_MAX       = 1.2,
         ANTIDASH_COOLDOWN        = 0.35,
-        DEACT_GONE_FACTOR        = 1.5,
-        DEACT_NOTARGET_FACTOR    = 1.2,
-        DEACT_STOP_DIST          = 12,
-        DEACT_STOP_SPD           = 3,
-        DEACT_TIMP_MIN           = 0.08,
-        DEACT_TIMP_MAX           = 0.25,
-        DEACT_TIMP_FACTOR        = 1.3,
-        DEACT_RETURN_FLOOR_MS    = 0.350,
-        DEACT_DOT_ENTER          = -0.30,
-        DEACT_DOT_EXIT           = -0.15,
-        DEACT_DOT_HOLD           = 0.350,
-        DEACT_DOT_MIN_SPD        = 1.0,
-        RING_FRESH_MAX           = 0.6,
+        DEACT_FACTOR             = 4.0,
+        DEACT_CONFIRM_MS         = 0.500,
+        DEACT_GONE_DIST          = 60,
+        DEACT_DOT_HOLD           = 0.150,
 }
 
 -- params
 local P = {
         DEFLECT_R    = 8.5,
-        RAD_FLOOR    = 14,
-        SPD_FACTOR   = 0.05,
-        PING_FACTOR  = 0.5,
-        MIN_MARGIN   = 1.5,
-        ANTIDASH_BONUS = 0,
 }
 
 -- state
-local RING_BUF = 8
-
 local _now = os.clock
-local _Probe, GameInfo, Utils, AutoParry
+local GameInfo, Utils, AutoParry
 local _localUserId = -1
 local _antidashCooldown, _antidashHooked = {}, {}
 local _lastDashTrack, _lastFullPlayerScan = 0, 0
-local _ctxCache = { t = 0, valid = false }
-local CLASH_SNAPSHOT_TTL = 0.05
 
 local S = {
         lastTarget      = -999,
@@ -83,9 +59,6 @@ local S = {
         clashAt         = 0,
         clashHoldUntil  = 0,
         lastClashReact  = 0,
-        targetRing      = table.create(RING_BUF, 0),
-        targetRingIdx   = 0,
-        targetCps       = 0,
         dashEvents      = {},
         dashPanicUntil  = 0,
         detPhase        = "IDLE",
@@ -100,28 +73,10 @@ local S = {
         burstOffStart   = 0,
         burstSignalDuringOn = false,
         dashAnti        = { untilT = 0, src = nil },
-        dotLeaveStart   = -1,
-        targetGraceAt   = 0,
+        dotNegStart     = -1,
 }
 
 -- helpers
-local function ringPush(t)
-        S.targetRingIdx = (S.targetRingIdx % RING_BUF) + 1
-        S.targetRing[S.targetRingIdx] = t
-end
-
-local function updateTargetCps(t)
-        local winStart = t - CLASH.CPS_WIN
-        local cnt = 0
-        for i = 1, RING_BUF do
-                local ts = S.targetRing[i]
-                if ts and ts >= winStart and ts >= t - CLASH.RING_FRESH_MAX then
-                        cnt = cnt + 1
-                end
-        end
-        S.targetCps = cnt / CLASH.CPS_WIN
-end
-
 local function isTargeted()
         local fn = GameInfo and GameInfo.isTargeted
         if type(fn) ~= "function" then return false end
@@ -131,6 +86,7 @@ end
 
 local function clearClash()
         S.clashOn, S.clashHoldUntil = false, 0
+        S.dotNegStart = -1
 end
 
 local function getDetectorRadius(spd)
@@ -227,115 +183,55 @@ local function tickReturnDetector(t, hr, ball)
         S.detWasInside = isInside
 end
 
--- snapshot
-local function clashSnapshot()
-        local t = _now()
-        if _ctxCache.valid and (t - _ctxCache.t) < CLASH_SNAPSHOT_TTL then
-                return _ctxCache
-        end
-        local hr = getMyHRP()
-        if not (hr and hr.Parent) then
-                _ctxCache.valid = false
-                return nil
-        end
-        updateTargetCps(t)
-        local ball = getBall()
-        if not (ball and ball.Parent) then
-                _ctxCache.valid = false
-                return nil
-        end
-        local nearest, nearestAlive = math.huge, false
-        local fnNear = GameInfo and GameInfo.nearestPlayerAlive
-        if type(fnNear) == "function" then
-                local okN, n, a = pcall(fnNear)
-                if okN then nearest, nearestAlive = n, a end
-        end
-        local bp = ball.Position
-        local bDist = (hr.Position - bp).Magnitude
-        local panic = nearestAlive and (nearest <= 9 and bDist <= 13)
-        local tImp, spd = 0, 0
-        local fnLive = GameInfo and GameInfo.liveTImp
-        if type(fnLive) == "function" then
-                local okL, live = pcall(fnLive)
-                if okL and live then
-                        tImp, spd = live.tImp or 0, live.spd or 0
-                end
-        end
-        if spd < 1 then
-                local fnComp = GameInfo and GameInfo.computeTImp
-                if type(fnComp) == "function" then
-                        local okC, ti, _, s2 = pcall(fnComp, hr, ball, t)
-                        if okC then tImp, spd = ti, s2 end
-                end
-        end
-        _ctxCache.t, _ctxCache.valid = t, true
-        _ctxCache.hr = hr
-        _ctxCache.ball, _ctxCache.bp = ball, bp
-        _ctxCache.nearest, _ctxCache.nearestAlive = nearest, nearestAlive
-        _ctxCache.bDist, _ctxCache.panic = bDist, panic
-        _ctxCache.tImp, _ctxCache.spd = tImp, spd
-        return _ctxCache
-end
-
 -- deactivation
--- trackDotLeaving: dot < 0 mantido por X ms = "bola realmente indo embora"
-local function isBallGoingAway(hrp, ball)
-        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return false end
-        local toMe = hrp.Position - ball.Position
-        if toMe.Magnitude < 1 then return false end
-        return av:Dot(toMe.Unit) < -0.1
-end
-
-local function tickDotLeave(t, hr, ball)
-        if isBallGoingAway(hr, ball) then
-                S.dotLeaveStart = S.dotLeaveStart or t
-                return (t - S.dotLeaveStart) > 0.10
-        else
-                S.dotLeaveStart = nil
+local function tickDotNeg(t, hr, ball)
+        if not (hr and hr.Parent and ball and ball.Parent) then
+                S.dotNegStart = nil
                 return false
         end
-end
-
-local function isBallApproaching(hrp, ball)
         local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return true end
-        local toMe = hrp.Position - ball.Position
-        if toMe.Magnitude < 1 then return true end
-        return av:Dot(toMe.Unit) > 0.2
+        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then
+                S.dotNegStart = nil
+                return false
+        end
+        local toMe = hr.Position - ball.Position
+        if toMe.Magnitude < 1 then
+                S.dotNegStart = nil
+                return false
+        end
+        if av:Dot(toMe.Unit) < -0.1 then
+                S.dotNegStart = S.dotNegStart or t
+        else
+                S.dotNegStart = nil
+        end
+        return S.dotNegStart > 0 and (t - S.dotNegStart) >= CLASH.DEACT_DOT_HOLD
 end
 
 local function shouldDeactivateClash()
         if not S.clashOn then return false end
         local t = _now()
+
         if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
+
         if not getLocalHumanoid() then return true end
         local ball = getBall()
         if not (ball and ball.Parent) then return true end
         local hr = getMyHRP()
         if not (hr and hr.Parent) then return true end
-        local ctx = clashSnapshot()
-        if not ctx then return true end
-        local spd  = ctx.spd or 0
-        local tImp = ctx.tImp or 0
 
-        -- Janela dinâmica por velocidade
-        local limit = math.max(CLASH.OFF_FAST, CLASH.OFF_BASE * (CLASH.SPD_REF / math.max(spd, 1)))
-
-        -- 1. Bola muito perto (parry é oq importa)
-        if ctx.bDist < 6 then return true end
-
-        -- 2. tImp estourou a janela E bola claramente indo embora há 100ms
-        if tImp > limit and tickDotLeave(t, hr, ball) then
+        if (hr.Position - ball.Position).Magnitude > CLASH.DEACT_GONE_DIST then
                 return true
         end
 
-        -- 3. Bola escapou de vez
-        if ctx.bDist > 40 then return true end
-
-        -- 4. Distância razoável E bola indo embora confirmado (100ms)
-        if ctx.bDist > 18 and tickDotLeave(t, hr, ball) then
-                return true
+        if S.detPhase == "EXITED" then
+                local elapsed = t - S.detExitAt
+                local limiar  = math.max(
+                        (S.detEntryTime or 0) * CLASH.DEACT_FACTOR,
+                        CLASH.DEACT_CONFIRM_MS
+                )
+                if elapsed > limiar and tickDotNeg(t, hr, ball) then
+                        return true
+                end
         end
 
         return false
@@ -350,7 +246,6 @@ local function activateBurst(t, Config)
         S.clashAt             = t
         S.clashHoldUntil      = t + CLASH.BURST_ON_MS
         S.lastClashReact      = t
-        S.dotLeaveStart       = nil
         if _G.PhantomOnBurst then pcall(_G.PhantomOnBurst) end
 end
 
@@ -359,7 +254,6 @@ local function onTarget(newTarget, t)
         if type(newTarget) ~= "number" then return end
         local previousTarget = S.lastTarget
         S.lastTarget = newTarget
-        ringPush(t)
         local ap = getAutoParryState()
         if ap then ap.armed = (newTarget == _localUserId) end
         local Config = _G.PhantomConfig
@@ -606,7 +500,6 @@ end
 -- api
 function AutoClash.setup(deps)
         deps = deps or {}
-        _Probe    = deps.Probe
         GameInfo  = deps.GameInfo
         Utils     = deps.Utils
         AutoParry = deps.AutoParry
@@ -626,22 +519,16 @@ function AutoClash.installAntiDashHooks() installAntiDashHooks(Utils.getPlayers(
 function AutoClash.getState()             return S end
 function AutoClash.clashOn()              return S.clashOn end
 function AutoClash.getClashAt()           return S.clashAt end
-function AutoClash.snapshot()             return clashSnapshot() end
-function AutoClash.invalidateSnapshot()   _ctxCache.valid = false end
 
 function AutoClash.resetState()
         S.clashOn, S.clashAt, S.clashHoldUntil, S.lastClashReact = false, 0, 0, 0
-        S.targetRingIdx, S.targetCps = 0, 0
-        for i = 1, RING_BUF do S.targetRing[i] = 0 end
         table.clear(S.dashEvents)
         S.dashPanicUntil = 0
         S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt = "IDLE", 0, 0, 0
         S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
         S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
         S.dashAnti = { untilT = 0, src = nil }
-        S.dotLeaveStart = -1
-        S.targetGraceAt = 0
-        _ctxCache.valid = false
+        S.dotNegStart = -1
 end
 
 return AutoClash
