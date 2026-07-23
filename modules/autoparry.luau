@@ -1,8 +1,6 @@
 --[[ AutoParry ]]
 
 local AutoParry = {}
-
--- deps
 local Probe, GameInfo, Utils
 
 -- tunning
@@ -301,15 +299,15 @@ local function bindParry(ch)
                     return
                 end
                 local t = _now()
+                -- Grace timeout PRIMEIRO: se Sync.Grace ficou stuck em true, limpa.
+                if Sync.Grace and (t - Sync.lastSyncAt) > P.GRACE_TIMEOUT then
+                    Sync.Grace = false
+                end
                 if t < _teleportLockUntil or Sync.Grace then
                     return
                 end
                 if (_G.PhantomClashOn and _G.PhantomClashOn()) or _G.PhantomManual then
                     return
-                end
-                -- Grace timeout: se Sync.Grace ficou stuck em true, limpa.
-                if Sync.Grace and (t - Sync.lastSyncAt) > P.GRACE_TIMEOUT then
-                    Sync.Grace = false
                 end
                 tickResilience(t)
                 local ball = GameInfo.getBall()
