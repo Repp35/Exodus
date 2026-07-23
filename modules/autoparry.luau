@@ -31,13 +31,7 @@ local P = {
     RES_HITBOX_PROX = 12,
     MIN_REFIRE_GAP = 0.015,
     REFIRE_TTH = 0.20,
-    TRIGGER_TTH = 0.22,
-    SYNC_STALE_T = 0.25,
     GRACE_TIMEOUT = 0.30,
-    PREDICT_DT_HARD_CAP = 0.30,
-    PARRY_RAD_HARD_CAP = 45,
-    DRIFT_REJECT = 25,
-    LEAD_PRED_FRAMES = 2,
 }
 
 -- AP
@@ -326,82 +320,46 @@ local function bindParry(ch)
                     AP.armed = false
                     return
                 end
-                -- Velocidade real (sempre fresh, vem do ball e nao do sync)
-                local okAv, av = pcall(function() return ball.AssemblyLinearVelocity end)
-                if not (okAv and typeof(av) == "Vector3") then
-                    return
-                end
-                local currentSpd = av.Magnitude
-                if currentSpd < P.MIN_SPD then
-                    return
-                end
-                -- Posicao predita: usa a MAIS RECENTE entre Sync.RealPos (extrapola com vel)
-                -- e ball.Position (real mas lagado de rede).
-                -- Nunca usa posicao congelada sem extrapolar.
-                local syncAge = t - Sync.lastSyncAt
-                local syncUsable = syncAge < P.SYNC_STALE_T and Sync.RealPos ~= Vector3.new(0, 0, 0)
-                local predictDt = 0
+                local syncFresh = (t - Sync.lastSyncAt) < 0.5
                 local bp
-                if syncUsable then
-                    -- Extrapola a posicao do sync com a velocidade ATUAL (nao a antiga)
-                    predictDt = math.min(syncAge, P.PREDICT_DT_HARD_CAP)
-                    bp = Sync.RealPos + av * predictDt
-                else
-                    -- Sync ta velho/zerado: usa ball.Position cru.
-                    -- So permite fire se o sync eh recente o suficiente pra ser confiavel.
-                    if syncAge > P.SYNC_STALE_T then
-                        return
+                local spd
+                if syncFresh and Sync.RealPos ~= Vector3.new(0, 0, 0) then
+                    local dt = math.min(t - Sync.lastSyncAt, 0.30)
+                    local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+                    if ok and typeof(av) == "Vector3" and av.Magnitude > 0.1 then
+                        bp = Sync.RealPos + av * dt
+                        spd = av.Magnitude
+                    else
+                        bp = ball.Position
+                        spd = 0
                     end
+                else
+                    local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
                     bp = ball.Position
+                    spd = (ok and typeof(av) == "Vector3") and av.Magnitude or 0
                 end
-                -- Sanity: drift entre posicao predita e posicao real do ball.
-                -- Se drift > DRIFT_REJECT, estado inconsistente, nao dispara.
-                local realBall = ball.Position
-                local drift = (bp - realBall).Magnitude
-                if drift > P.DRIFT_REJECT then
+                if spd < P.MIN_SPD then
                     return
                 end
-                -- Tempo ate a bola chegar: usa distancia predita + vel real.
-                local toMe = hrp.Position - bp
-                local dist = toMe.Magnitude
-                if dist < 1e-4 then
-                    return
-                end
-                local unit = toMe / dist
-                local closing = av:Dot(unit)
-                if closing <= 0 then
-                    return  -- bola indo embora, nao clica
-                end
-                local timeToHit = dist / closing
-                if timeToHit > P.TRIGGER_TTH and not AP.fired then
-                    return  -- longe demais pra entry fire
-                end
-                -- Raio de parry com cap duro (impede estouro por resi+lag combinados)
                 local tickMs = (GameInfo.frameEMA() > 0 and GameInfo.frameEMA() * 1000) or 16.67
                 local leadSec = math.max(
                     GameInfo.pingRTT() * P.LEAD_RTT_MULT + (P.LEAD_TICK_FRAMES * tickMs / 1000),
                     P.LEAD_PING_FLOOR
                 )
-                local leadB = math.min(currentSpd * leadSec, P.LEAD_CAP)
-                local pbStuds = math.min(GameInfo.preBufferStuds(currentSpd), P.PRE_CAP)
-                local resBonus = resRadiusBonus()
-                local parryRad = P.DEFLECT_R + leadB + pbStuds + resBonus
-                parryRad = math.clamp(parryRad, P.DEFLECT_R, P.PARRY_RAD_HARD_CAP)
-                parryRad = math.max(parryRad, P.RAD_FLOOR)
-                if dist > parryRad then
-                    AP.wasInRange = false
+                local leadB = math.min(spd * leadSec, P.LEAD_CAP)
+                local pbStuds = math.min(GameInfo.preBufferStuds(spd), P.PRE_CAP)
+                local parryRad = math.max(P.DEFLECT_R + leadB + pbStuds + resRadiusBonus(), P.RAD_FLOOR)
+                local dx = hrp.Position.X - bp.X
+                local dy = hrp.Position.Y - bp.Y
+                local dz = hrp.Position.Z - bp.Z
+                local dist2 = dx * dx + dy * dy + dz * dz
+                if dist2 > parryRad * parryRad then
+                    AP.wasInRange, AP.inRangeEnterAt = false, 0
                     return
                 end
                 AP.wasInRange = true
                 if AP.fired then
-                    -- Refire: usa bp predito + vel real. S'o clica se ainda ta chegando.
                     if (t - AP.firedAt) < P.MIN_REFIRE_GAP then
-                        return
-                    end
-                    if timeToHit > P.REFIRE_TTH then
-                        return
-                    end
-                    if closing <= 0 then
                         return
                     end
                     if sendParry() then
