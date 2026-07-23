@@ -269,7 +269,8 @@ local function onTarget(newTarget, t)
         local okS, speed = pcall(fnBS, ball, t)
         if not (okP and okS) then return end
         local bDist = (hr.Position - bp).Magnitude
-        local impactTime = speed > 1 and fnTIC(bDist, speed) or math.huge
+        local okT, impactTime = speed > 1 and pcall(fnTIC, bDist, speed) or false, math.huge
+        if not okT then impactTime = math.huge end
         if bDist <= CLASH.BALL_HARD_CAP
                 and impactTime <= CLASH.OFF_FAST
                 and (t - S.lastClashReact) >= CLASH.REACT_CD
@@ -519,6 +520,8 @@ function AutoClash.installAntiDashHooks() installAntiDashHooks(Utils.getPlayers(
 function AutoClash.getState()             return S end
 function AutoClash.clashOn()              return S.clashOn end
 function AutoClash.getClashAt()           return S.clashAt end
+function AutoClash.snapshot()             return nil end
+function AutoClash.invalidateSnapshot()   end
 
 function AutoClash.resetState()
         S.clashOn, S.clashAt, S.clashHoldUntil, S.lastClashReact = false, 0, 0, 0
