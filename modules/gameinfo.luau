@@ -1,5 +1,4 @@
 --[[ GameInfo ]]
-
 local GameInfo = {}
 
 -- services
@@ -324,6 +323,82 @@ local function clearBallRef(b)
     end
 end
 
+-- _deflectAbilityRef
+local _deflectAbilityRef = nil
+local _deflectAbilityTried = false
+local _deflectAbilityLastCheck = 0
+
+local function _ensureDeflectAbility()
+    -- se já temos, retorna
+    if _deflectAbilityRef and _deflectAbilityRef.Parent ~= nil then
+        return _deflectAbilityRef
+    end
+    -- tenta resolver a cada 2s até achar (BindableManager pode demorar pra popular)
+    local t = os.clock()
+    if _deflectAbilityTried and (t - _deflectAbilityLastCheck) < 2.0 then
+        return _deflectAbilityRef
+    end
+    _deflectAbilityTried = true
+    _deflectAbilityLastCheck = t
+
+    pcall(
+        function()
+            local ts = game:GetService("ReplicatedStorage"):FindFirstChild("TS")
+            if not ts then
+                return
+            end
+            local bmMod = ts:FindFirstChild("BindableManager")
+            if not bmMod then
+                return
+            end
+            local ok, BM =
+                pcall(
+                function()
+                    return require(bmMod)
+                end
+            )
+            if not ok or not BM or not BM.GetFunction then
+                return
+            end
+            local getFn = BM:GetFunction("AbilityManager::GetAbility")
+            if not getFn then
+                return
+            end
+            -- tenta as keys conhecidas
+            for _, key in ipairs({"Deflect", "Block"}) do
+                local ok2, ref =
+                    pcall(
+                    function()
+                        return getFn:Invoke(key)
+                    end
+                )
+                if ok2 and ref and type(ref.Cooldown) == "number" and type(ref.SetCooldown) == "function" then
+                    _deflectAbilityRef = ref
+                    return
+                end
+            end
+        end
+    )
+    return _deflectAbilityRef
+end
+
+local function getDeflectCD()
+    local ref = _ensureDeflectAbility()
+    if not ref then
+        return 0
+    end
+    local ok, v =
+        pcall(
+        function()
+            return ref.Cooldown
+        end
+    )
+    if ok and type(v) == "number" then
+        return v
+    end
+    return 0
+end
+
 -- installBallWatcher
 local function installBallWatcher(track)
     local gameFolder = workspace:WaitForChild("Game", 30)
@@ -434,6 +509,9 @@ function GameInfo.shouldSamplePing(interval)
 end
 function GameInfo.installBallWatcher(track)
     installBallWatcher(track)
+end
+function GameInfo.getDeflectCD()
+    return getDeflectCD()
 end
 
 return GameInfo
