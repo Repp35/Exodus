@@ -252,6 +252,7 @@ end
 -- target
 local function onTarget(newTarget, t)
         if type(newTarget) ~= "number" then return end
+        if not GameInfo then return end
         local previousTarget = S.lastTarget
         S.lastTarget = newTarget
         local ap = getAutoParryState()
@@ -269,8 +270,11 @@ local function onTarget(newTarget, t)
         local okS, speed = pcall(fnBS, ball, t)
         if not (okP and okS) then return end
         local bDist = (hr.Position - bp).Magnitude
-        local okT, impactTime = speed > 1 and pcall(fnTIC, bDist, speed) or false, math.huge
-        if not okT then impactTime = math.huge end
+        local impactTime = math.huge
+        if speed > 1 then
+                local okT, v = pcall(fnTIC, bDist, speed)
+                if okT and type(v) == "number" then impactTime = v end
+        end
         if bDist <= CLASH.BALL_HARD_CAP
                 and impactTime <= CLASH.OFF_FAST
                 and (t - S.lastClashReact) >= CLASH.REACT_CD
