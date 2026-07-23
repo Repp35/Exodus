@@ -350,12 +350,12 @@ local function bindParry(ch)
                 end
                 AP.wasInRange = true
                 if AP.fired then
-                    if (t - AP.firedAt) < P.MIN_REFIRE_GAP then
+                    -- Já clicou nessa rajada, não clica de novo até o target mudar.
+                    if (t - AP.firedAt) < P.FIRE_LOCK then
                         return
                     end
-                    if sendParry() then
-                        AP.firedAt = t
-                    end
+                    -- Sem burst no Exodus: deixa o guard de tempo cuidar.
+                    -- O reset de AP.fired vem do onBallSync quando o target muda.
                     return
                 end
                 if AP.firedAt > Sync.lastSyncAt then
