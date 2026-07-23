@@ -2,7 +2,6 @@
 
 local AutoClash = {}
 
--- tuning
 local CLASH = {
         BALL_HARD_CAP            = 22,
         HOLD                     = 0.20,
@@ -35,19 +34,19 @@ local CLASH = {
         ANTIDASH_PANIC_HOLD      = 0.45,
         ANTIDASH_PANIC_MAX       = 1.2,
         ANTIDASH_COOLDOWN        = 0.35,
+        ANTIDASH_BONUS           = 0,
         DEACT_FACTOR             = 4.0,
         DEACT_CONFIRM_MS         = 0.500,
         DEACT_GONE_DIST          = 60,
         DEACT_DOT_HOLD           = 0.150,
 }
 
--- params
 local P = {
-        DEFLECT_R    = 8.5,
+        DEFLECT_R = 8.5,
 }
 
--- state
 local _now = os.clock
+
 local GameInfo, Utils, AutoParry
 local _localUserId = -1
 local _antidashCooldown, _antidashHooked = {}, {}
@@ -55,12 +54,11 @@ local _lastDashTrack, _lastFullPlayerScan = 0, 0
 
 local S = {
         lastTarget      = -999,
+        wasTargeted     = false,
         clashOn         = false,
         clashAt         = 0,
         clashHoldUntil  = 0,
         lastClashReact  = 0,
-        dashEvents      = {},
-        dashPanicUntil  = 0,
         detPhase        = "IDLE",
         detEnterAt      = 0,
         detEntryTime    = 0,
@@ -73,20 +71,25 @@ local S = {
         burstOffStart   = 0,
         burstSignalDuringOn = false,
         dashAnti        = { untilT = 0, src = nil },
-        dotNegStart     = -1,
+        dashPanicUntil  = 0,
+        dashEvents      = {},
+        dotNegStart     = nil,
 }
 
 -- helpers
-local function isTargeted()
+local function isTargeted(target)
         local fn = GameInfo and GameInfo.isTargeted
         if type(fn) ~= "function" then return false end
-        local ok, v = pcall(fn, S.lastTarget)
+        local ok, v = pcall(fn, target)
         return ok and v or false
 end
 
 local function clearClash()
-        S.clashOn, S.clashHoldUntil = false, 0
-        S.dotNegStart = -1
+        S.clashOn        = false
+        S.clashHoldUntil = 0
+        S.dotNegStart    = nil
+        S.burstState     = "IDLE"
+        S.burstSignalDuringOn = false
 end
 
 local function getDetectorRadius(spd)
@@ -118,7 +121,8 @@ end
 local function getLocalHumanoid()
         if not Utils then return nil end
         local lp = Utils.getLocalPlayer()
-        local ch = lp and lp.Character
+        if not (lp and lp.Parent) then return nil end
+        local ch = lp.Character
         if not (ch and ch.Parent) then return nil end
         local hum = ch:FindFirstChildOfClass("Humanoid")
         if not (hum and hum.Parent and hum.Health > 0) then return nil end
@@ -126,36 +130,68 @@ local function getLocalHumanoid()
 end
 
 local function getMyHRP()
-        local lp = Utils and Utils.getLocalPlayer()
+        if not Utils then return nil end
+        local lp = Utils.getLocalPlayer()
         local ch = lp and lp.Character
         return ch and ch:FindFirstChild("HumanoidRootPart") or nil
 end
 
--- detector
+local function getPlayers()
+        if not Utils then return nil end
+        local fn = Utils.getPlayers
+        if type(fn) ~= "function" then return nil end
+        local ok, p = pcall(fn)
+        return ok and p or nil
+end
+
+local function burstActivate(t)
+        S.clashOn        = true
+        S.clashAt        = t
+        S.clashHoldUntil = t + CLASH.BURST_ON_MS
+        S.lastClashReact = t
+        S.burstState          = "ON"
+        S.burstOnStart        = t
+        S.burstSignalDuringOn = false
+        S.burstOffStart       = 0
+        if _G.PhantomOnBurst then pcall(_G.PhantomOnBurst) end
+end
+
+-- return detector
 local function tickReturnDetector(t, hr, ball)
         S.detSignal = false
+
         if not (hr and hr.Parent and ball and ball.Parent) then
                 S.detPhase, S.detDotEma, S.detWasInside = "IDLE", 0, false
                 return
         end
+
         local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return end
+        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then
+                S.detDotEma = 0
+                return
+        end
+
         local spd    = av.Magnitude
         local radius = getDetectorRadius(spd)
         local toMe   = hr.Position - ball.Position
         local dist   = toMe.Magnitude
-        local dotRaw = av:Dot(toMe.Unit)
+        local unit   = toMe.Magnitude > 0.001 and toMe.Unit or Vector3.zero
+        local dotRaw = av:Dot(unit)
+
         if dist <= radius * 1.2 then
                 S.detDotEma = S.detDotEma * (1 - CLASH.DET_DOT_EMA) + dotRaw * CLASH.DET_DOT_EMA
-        else
+        elseif dotRaw < CLASH.DET_DOT_THRESH then
                 S.detDotEma = 0
         end
+
         local isInside  = dist <= radius
         local dotComing = S.detDotEma >  CLASH.DET_DOT_THRESH
         local dotGoing  = S.detDotEma < -CLASH.DET_DOT_THRESH
+
         if S.detPhase == "EXITED" and (t - S.detExitAt) > CLASH.DET_TIMEOUT then
                 S.detPhase = "IDLE"
         end
+
         if S.detPhase == "IDLE" then
                 if (isInside and not S.detWasInside) or (not isInside and dotComing) then
                         local entryTime = dist > 0.1 and (dist / spd) or 0.01
@@ -170,7 +206,8 @@ local function tickReturnDetector(t, hr, ball)
                 end
         elseif S.detPhase == "EXITED" then
                 local limiar = S.detEntryTime * CLASH.DET_RETURN_FACTOR
-                if (isInside and not S.detWasInside) or dotComing then
+                local reEntry = (isInside and not S.detWasInside) or (not isInside and dotComing)
+                if reEntry then
                         if limiar > 0 and (t - S.detExitAt) <= limiar and dotComing then
                                 S.detSignal = true
                         end
@@ -180,6 +217,7 @@ local function tickReturnDetector(t, hr, ball)
                         S.detEntryTime = entryTime
                 end
         end
+
         S.detWasInside = isInside
 end
 
@@ -204,19 +242,16 @@ local function tickDotNeg(t, hr, ball)
         else
                 S.dotNegStart = nil
         end
-        return S.dotNegStart > 0 and (t - S.dotNegStart) >= CLASH.DEACT_DOT_HOLD
+        return S.dotNegStart ~= nil and (t - S.dotNegStart) >= CLASH.DEACT_DOT_HOLD
 end
 
-local function shouldDeactivateClash()
+local function shouldDeactivateClash(t, hr, ball)
         if not S.clashOn then return false end
-        local t = _now()
 
         if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
 
         if not getLocalHumanoid() then return true end
-        local ball = getBall()
         if not (ball and ball.Parent) then return true end
-        local hr = getMyHRP()
         if not (hr and hr.Parent) then return true end
 
         if (hr.Position - ball.Position).Magnitude > CLASH.DEACT_GONE_DIST then
@@ -237,49 +272,45 @@ local function shouldDeactivateClash()
         return false
 end
 
--- burst
-local function activateBurst(t, Config)
-        S.burstState          = "ON"
-        S.burstOnStart        = t
-        S.burstSignalDuringOn = false
-        S.clashOn             = true
-        S.clashAt             = t
-        S.clashHoldUntil      = t + CLASH.BURST_ON_MS
-        S.lastClashReact      = t
-        if _G.PhantomOnBurst then pcall(_G.PhantomOnBurst) end
-end
-
 -- target
 local function onTarget(newTarget, t)
         if type(newTarget) ~= "number" then return end
         if not GameInfo then return end
+
         local previousTarget = S.lastTarget
         S.lastTarget = newTarget
+
         local ap = getAutoParryState()
         if ap then ap.armed = (newTarget == _localUserId) end
+
         local Config = _G.PhantomConfig
-        local targeted = newTarget == _localUserId
-        if not (targeted and Config and Config.AutoClash ~= false and not _G.PhantomManual) then return end
-        if previousTarget == _localUserId or previousTarget == -999 then return end
+        if not Config or Config.AutoClash == false or _G.PhantomManual then return end
+        if newTarget ~= _localUserId then return end
+        if previousTarget == newTarget then return end
+
         local hr = getMyHRP()
         local ball = getBall()
         if not (hr and hr.Parent and ball and ball.Parent) then return end
+
         local fnBP, fnBS, fnTIC = GameInfo.ballPos, GameInfo.ballSpeed, GameInfo.tImpCompensated
         if type(fnBP) ~= "function" or type(fnBS) ~= "function" or type(fnTIC) ~= "function" then return end
+
         local okP, bp = pcall(fnBP, ball, t)
         local okS, speed = pcall(fnBS, ball, t)
         if not (okP and okS) then return end
+
         local bDist = (hr.Position - bp).Magnitude
         local impactTime = math.huge
         if speed > 1 then
                 local okT, v = pcall(fnTIC, bDist, speed)
                 if okT and type(v) == "number" then impactTime = v end
         end
+
         if bDist <= CLASH.BALL_HARD_CAP
                 and impactTime <= CLASH.OFF_FAST
                 and (t - S.lastClashReact) >= CLASH.REACT_CD
         then
-                activateBurst(t, Config)
+                burstActivate(t)
                 S.clashHoldUntil = t + CLASH.HOLD
         end
 end
@@ -289,25 +320,31 @@ local function evaluateClash(t, hr, ball, Config)
         if not Config or Config.AutoClash == false or _G.PhantomManual then
                 if S.clashOn then clearClash() end
                 S.burstState, S.burstSignalDuringOn = "IDLE", false
+                S.detSignal = false
                 return
         end
+
         tickReturnDetector(t, hr, ball)
-        if S.clashOn and shouldDeactivateClash() then
+
+        if S.clashOn and shouldDeactivateClash(t, hr, ball) then
                 clearClash()
                 S.burstState, S.burstSignalDuringOn = "IDLE", false
                 return
         end
+
+        local antiDashActive = S.dashAnti.untilT > t
+        local canFire = (S.detSignal and isTargeted(S.lastTarget)) or antiDashActive
+
         if S.clashOn then
                 if S.burstState == "ON" and S.detSignal then
-                        S.burstOnStart        = t
-                        S.clashHoldUntil      = t + CLASH.BURST_ON_MS
+                        S.burstOnStart   = t
+                        S.clashHoldUntil = t + CLASH.BURST_ON_MS
                 end
                 return
         end
-        local antiDashActive = S.dashAnti.untilT > t
-        local canFire = (S.detSignal and isTargeted()) or antiDashActive
+
         if S.burstState == "IDLE" then
-                if canFire then activateBurst(t, Config) end
+                if canFire then burstActivate(t) end
         elseif S.burstState == "ON" then
                 if S.detSignal then S.burstSignalDuringOn = true end
                 if (t - S.burstOnStart) >= CLASH.BURST_ON_MS then
@@ -321,7 +358,7 @@ local function evaluateClash(t, hr, ball, Config)
                 end
         elseif S.burstState == "OFF" then
                 if canFire then
-                        activateBurst(t, Config)
+                        burstActivate(t)
                 elseif (t - S.burstOffStart) >= CLASH.BURST_OFF_MS then
                         S.burstState = "IDLE"
                 end
@@ -329,16 +366,22 @@ local function evaluateClash(t, hr, ball, Config)
 end
 
 -- dash track
-local function updateDashTrack(t, Players)
+local function updateDashTrack(t)
+        local Players = getPlayers()
+        if not Players then return end
+
         if (t - _lastDashTrack) < CLASH.DASH_TRACK_INTERVAL then return end
         _lastDashTrack = t
+
         local lp = Utils.getLocalPlayer()
-        local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        local ch = lp and lp.Character
+        local myHRP = ch and ch:FindFirstChild("HumanoidRootPart")
         if not (myHRP and myHRP.Parent) then
                 table.clear(S.dashEvents)
                 return
         end
         local myPos = myHRP.Position
+
         local fullScan = (t - _lastFullPlayerScan) >= CLASH.FULL_PLAYER_SCAN_INTERVAL
         local playersToCheck = {}
         if fullScan then
@@ -354,8 +397,8 @@ local function updateDashTrack(t, Players)
                         if S.dashEvents[p.UserId] then
                                 table.insert(playersToCheck, p)
                         else
-                                local ch = p.Character
-                                local php = ch and ch:FindFirstChild("HumanoidRootPart")
+                                local pch = p.Character
+                                local php = pch and pch:FindFirstChild("HumanoidRootPart")
                                 if php and php.Parent and (myPos - php.Position).Magnitude <= CLASH.PLAYER_SCAN_RADIUS then
                                         table.insert(playersToCheck, p)
                                 end
@@ -368,18 +411,20 @@ local function updateDashTrack(t, Players)
                         end
                 end
         end
+
         local processed = {}
         for _, p in ipairs(playersToCheck) do
                 if processed[p.UserId] then continue end
                 processed[p.UserId] = true
-                local ch = p.Character
-                local php = ch and ch:FindFirstChild("HumanoidRootPart")
-                local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                local pch = p.Character
+                local php = pch and pch:FindFirstChild("HumanoidRootPart")
+                local hum = pch and pch:FindFirstChildOfClass("Humanoid")
                 local alive = php and php.Parent and hum and hum.Parent and hum.Health > 0
                 if not alive then
                         S.dashEvents[p.UserId] = nil
                         continue
                 end
+
                 local ok, av = pcall(function() return php.AssemblyLinearVelocity end)
                 if not (ok and typeof(av) == "Vector3") then
                         S.dashEvents[p.UserId] = nil
@@ -387,6 +432,7 @@ local function updateDashTrack(t, Players)
                 end
                 local spd = av.Magnitude
                 local ev = S.dashEvents[p.UserId]
+
                 if spd >= CLASH.DASH_SPD_THRESH then
                         local dir = spd > 0.1 and av.Unit or nil
                         if not ev then
@@ -403,9 +449,11 @@ local function updateDashTrack(t, Players)
                         S.dashEvents[p.UserId] = nil
                 end
         end
+
         for uid in pairs(S.dashEvents) do
                 if not processed[uid] then S.dashEvents[uid] = nil end
         end
+
         for uid, ev in pairs(S.dashEvents) do
                 if not (ev and ev.confirmed and ev.dir and ev.spd) then continue end
                 local dur = ev.at - ev.startedAt
@@ -430,30 +478,39 @@ local function updateDashTrack(t, Players)
         end
 end
 
--- antidash
+-- anti-dash
 local function reportDash(player)
-        if not player or not Utils then return end
+        if not (player and Utils) then return end
         local lp = Utils.getLocalPlayer()
         if player == lp then return end
         if not (_G.PhantomState and _G.PhantomState.active) then return end
+
         local t = _now()
         if _antidashCooldown[player.UserId] and (t - _antidashCooldown[player.UserId]) < CLASH.ANTIDASH_COOLDOWN then return end
         _antidashCooldown[player.UserId] = t
+
         local ch = player.Character
         if not (ch and ch.Parent) then return end
         local php = ch:FindFirstChild("HumanoidRootPart")
         local myHRP = getMyHRP()
         if not (php and php.Parent and myHRP and myHRP.Parent) then return end
-        local rad = math.clamp(P.DEFLECT_R + getParryBonus() + P.ANTIDASH_BONUS, CLASH.ANTIDASH_RAD_MIN, CLASH.ANTIDASH_RAD_MAX)
+
+        local rad = math.clamp(
+                P.DEFLECT_R + getParryBonus() + CLASH.ANTIDASH_BONUS,
+                CLASH.ANTIDASH_RAD_MIN,
+                CLASH.ANTIDASH_RAD_MAX
+        )
         local toMe = myHRP.Position - php.Position
         local dist = toMe.Magnitude
         if dist > rad or dist < 0.1 then return end
+
         local dot = 1
         local ok, av = pcall(function() return php.AssemblyLinearVelocity end)
         if ok and typeof(av) == "Vector3" and av.Magnitude > 1 then
                 dot = av.Unit:Dot(toMe.Unit)
         end
         if dot < CLASH.ANTIDASH_DOT_MIN then return end
+
         local untilT = math.min(t + CLASH.ANTIDASH_PANIC_MAX, t + CLASH.ANTIDASH_PANIC_HOLD)
         S.dashAnti.untilT = math.max(S.dashAnti.untilT, untilT)
         S.dashAnti.src    = player
@@ -462,8 +519,8 @@ end
 local function isDashAnimation(track)
         if not track or not track.Animation then return false end
         local n  = (track.Name or ""):lower()
-        local an = track.Animation.Name:lower()
-        return n:find("dash", 1, true) or an:find("dash", 1, true) ~= nil
+        local an = (track.Animation.Name or ""):lower()
+        return n:find("dash", 1, true) ~= nil or an:find("dash", 1, true) ~= nil
 end
 
 local function _hookPlayerAntiDash(player)
@@ -471,6 +528,7 @@ local function _hookPlayerAntiDash(player)
         if player == Utils.getLocalPlayer() then return end
         if _antidashHooked[player] then return end
         _antidashHooked[player] = true
+
         local function attach(char)
                 if not char then return end
                 local hum = char:FindFirstChildOfClass("Humanoid")
@@ -484,11 +542,14 @@ local function _hookPlayerAntiDash(player)
                         if isDashAnimation(track) then reportDash(player) end
                 end)
         end
+
         if player.Character then attach(player.Character) end
         player.CharacterAdded:Connect(attach)
 end
 
-local function installAntiDashHooks(Players)
+local function installAntiDashHooks()
+        local Players = getPlayers()
+        if not Players then return end
         for _, p in ipairs(Players:GetPlayers()) do
                 if p ~= Utils.getLocalPlayer() then _hookPlayerAntiDash(p) end
         end
@@ -508,8 +569,10 @@ function AutoClash.setup(deps)
         GameInfo  = deps.GameInfo
         Utils     = deps.Utils
         AutoParry = deps.AutoParry
+
         local ok, lp = pcall(Utils.getLocalPlayer)
         _localUserId = (ok and lp and lp.UserId) or -1
+
         _G.PhantomClashOn    = function() return S.clashOn end
         _G.PhantomOnTarget   = onTarget
         _G.PhantomOnTeleport = clearClash
@@ -519,23 +582,39 @@ function AutoClash.evaluate(t, hr, ball, Config)
         evaluateClash(t, hr, ball, Config)
 end
 
-function AutoClash.updateDashTrack(t)     updateDashTrack(t, Utils.getPlayers()) end
-function AutoClash.installAntiDashHooks() installAntiDashHooks(Utils.getPlayers()) end
-function AutoClash.getState()             return S end
-function AutoClash.clashOn()              return S.clashOn end
-function AutoClash.getClashAt()           return S.clashAt end
+function AutoClash.updateDashTrack(t)
+        updateDashTrack(t)
+end
+
+function AutoClash.installAntiDashHooks()
+        installAntiDashHooks()
+end
+
+function AutoClash.getState()   return S end
+function AutoClash.clashOn()    return S.clashOn end
+function AutoClash.getClashAt() return S.clashAt end
 function AutoClash.snapshot()             return nil end
 function AutoClash.invalidateSnapshot()   end
 
 function AutoClash.resetState()
+        S.lastTarget        = -999
+        S.wasTargeted       = false
         S.clashOn, S.clashAt, S.clashHoldUntil, S.lastClashReact = false, 0, 0, 0
         table.clear(S.dashEvents)
-        S.dashPanicUntil = 0
-        S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt = "IDLE", 0, 0, 0
-        S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
-        S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
-        S.dashAnti = { untilT = 0, src = nil }
-        S.dotNegStart = -1
+        S.dashPanicUntil    = 0
+        S.detPhase          = "IDLE"
+        S.detEnterAt        = 0
+        S.detEntryTime      = 0
+        S.detExitAt         = 0
+        S.detDotEma         = 0
+        S.detWasInside      = false
+        S.detSignal         = false
+        S.burstState        = "IDLE"
+        S.burstOnStart      = 0
+        S.burstOffStart     = 0
+        S.burstSignalDuringOn = false
+        S.dashAnti          = { untilT = 0, src = nil }
+        S.dotNegStart       = nil
 end
 
 return AutoClash
