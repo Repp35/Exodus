@@ -1,6 +1,8 @@
 --[[ AutoParry ]]
 
 local AutoParry = {}
+
+-- deps
 local Probe, GameInfo, Utils
 
 -- tunning
@@ -319,21 +321,12 @@ local function bindParry(ch)
                     return
                 end
                 local syncFresh = (t - Sync.lastSyncAt) < 0.5
-                local bp
+                local bp = (syncFresh and Sync.RealPos ~= Vector3.new(0, 0, 0)) and Sync.RealPos or ball.Position
                 local spd
-                if syncFresh and Sync.RealPos ~= Vector3.new(0, 0, 0) then
-                    local dt = math.min(t - Sync.lastSyncAt, 0.30)
-                    local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-                    if ok and typeof(av) == "Vector3" and av.Magnitude > 0.1 then
-                        bp = Sync.RealPos + av * dt
-                        spd = av.Magnitude
-                    else
-                        bp = ball.Position
-                        spd = 0
-                    end
+                if syncFresh and Sync.Speed > 0 then
+                    spd = Sync.Speed
                 else
                     local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-                    bp = ball.Position
                     spd = (ok and typeof(av) == "Vector3") and av.Magnitude or 0
                 end
                 if spd < P.MIN_SPD then
