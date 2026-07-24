@@ -134,6 +134,14 @@ end
 
 local function clearClash()
         S.clashOn, S.clashHoldUntil = false, 0
+        -- reset de burst: sem isso, na próxima reativação o branch
+        -- errado de burstState é pego e activateBurst nunca dispara de novo
+        S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
+        -- reset do detector: detSignal/detPhase velhos podiam reativar
+        -- o clash no tick seguinte mesmo sem a bola estar perto
+        S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt = "IDLE", 0, 0, 0
+        S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
+        S.dotLeaveStart = -1
 end
 
 local function getDetectorRadius(spd)
