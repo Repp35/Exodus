@@ -79,9 +79,13 @@ local S = {
 -- helpers
 local function isTargeted(target)
         local fn = GameInfo and GameInfo.isTargeted
-        if type(fn) ~= "function" then return false end
-        local ok, v = pcall(fn, target)
-        return ok and v or false
+        if type(fn) == "function" then
+                local ok, v = pcall(fn, target)
+                if ok and v then return true end
+        end
+        if type(target) == "number" and target == _localUserId then return true end
+        if type(target) == "number" and target == -999 and S.lastTarget == _localUserId then return true end
+        return false
 end
 
 local function clearClash()
@@ -221,30 +225,6 @@ local function tickReturnDetector(t, hr, ball)
         S.detWasInside = isInside
 end
 
--- deactivation
-local function tickDotNeg(t, hr, ball)
-        if not (hr and hr.Parent and ball and ball.Parent) then
-                S.dotNegStart = nil
-                return false
-        end
-        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then
-                S.dotNegStart = nil
-                return false
-        end
-        local toMe = hr.Position - ball.Position
-        if toMe.Magnitude < 1 then
-                S.dotNegStart = nil
-                return false
-        end
-        if av:Dot(toMe.Unit) < -0.1 then
-                S.dotNegStart = S.dotNegStart or t
-        else
-                S.dotNegStart = nil
-        end
-        return S.dotNegStart ~= nil and (t - S.dotNegStart) >= CLASH.DEACT_DOT_HOLD
-end
-
 local function shouldDeactivateClash(t, hr, ball)
         if t < S.clashHoldUntil then
                 return false
@@ -262,14 +242,21 @@ local function shouldDeactivateClash(t, hr, ball)
                 return true
         end
 
-        if S.detPhase == "EXITED" then
-                local elapsed = t - S.detExitAt
-                local limiar  = math.max(
-                        (S.detEntryTime or 0) * CLASH.DEACT_FACTOR,
-                        CLASH.DEACT_CONFIRM_MS
-                )
-                if elapsed > limiar and tickDotNeg(t, hr, ball) then
-                        return true
+        if S.burstState == "IDLE" and S.detPhase == "EXITED" then
+                local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+                if ok and typeof(av) == "Vector3" and av.Magnitude > 1 then
+                        local toMe = hr.Position - ball.Position
+                        if toMe.Magnitude > 1 then
+                                local closing = av:Dot(toMe.Unit)
+                                if closing < -0.1 then
+                                        S.dotNegStart = S.dotNegStart or t
+                                        if (t - S.dotNegStart) >= CLASH.DEACT_DOT_HOLD then
+                                                return true
+                                        end
+                                else
+                                        S.dotNegStart = nil
+                                end
+                        end
                 end
         end
 
@@ -568,6 +555,23 @@ local function installAntiDashHooks()
 end
 
 -- api
+local _ballSyncConn
+local function hookBallSync()
+        if _ballSyncConn then return end
+        local ok, rep = pcall(function() return game:GetService("ReplicatedStorage") end)
+        if not ok or not rep then return end
+        local remote = rep:FindFirstChild("Remotes") and rep.Remotes:FindFirstChild("BallSyncData")
+        if not (remote and remote:IsA("RemoteEvent")) then
+                remote = rep:FindFirstChild("BallSyncData", true)
+        end
+        if not (remote and remote:IsA("RemoteEvent")) then return end
+        _ballSyncConn = remote.OnClientEvent:Connect(function(d)
+                if type(d) == "table" and type(d.TargetPlayerID) == "number" then
+                        onTarget(d.TargetPlayerID, _now())
+                end
+        end)
+end
+
 function AutoClash.setup(deps)
         deps = deps or {}
         GameInfo  = deps.GameInfo
@@ -580,6 +584,8 @@ function AutoClash.setup(deps)
         _G.PhantomClashOn    = function() return S.clashOn end
         _G.PhantomOnTarget   = onTarget
         _G.PhantomOnTeleport = clearClash
+
+        pcall(hookBallSync)
 end
 
 function AutoClash.evaluate(t, hr, ball, Config)
@@ -601,6 +607,7 @@ function AutoClash.snapshot()             return nil end
 function AutoClash.invalidateSnapshot()   end
 
 function AutoClash.resetState()
+        if _ballSyncConn then pcall(_ballSyncConn.Disconnect, _ballSyncConn); _ballSyncConn = nil end
         S.lastTarget        = -999
         S.wasTargeted       = false
         S.clashOn, S.clashAt, S.clashHoldUntil, S.lastClashReact = false, 0, 0, 0
