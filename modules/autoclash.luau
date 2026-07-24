@@ -39,6 +39,7 @@ local CLASH = {
         DEACT_CONFIRM_MS         = 0.500,
         DEACT_GONE_DIST          = 60,
         DEACT_DOT_HOLD           = 0.150,
+        MIN_HOLD                 = 0.050,
 }
 
 local P = {
@@ -240,8 +241,12 @@ end
 
 local function shouldDeactivateClash(t, hr, ball)
         if not S.clashOn then return false end
-        if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
-        if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
+        local minHold = CLASH.MIN_HOLD or 0.05
+        local maxHold = CLASH.MAX_HOLD or 1.2
+        local goneDist = CLASH.DEACT_GONE_DIST or 60
+        if type(S.clashAt) ~= "number" or type(S.clashHoldUntil) ~= "number" then return false end
+        if t < math.max(S.clashAt + minHold, S.clashHoldUntil) then return false end
+        if (t - S.clashAt) > maxHold then return true end
         if not getLocalHumanoid() then return true end
         if not (ball and ball.Parent) then return true end
         if not (hr and hr.Parent) then return true end
@@ -251,7 +256,7 @@ local function shouldDeactivateClash(t, hr, ball)
         if ok and typeof(av) == "Vector3" then spd = av.Magnitude end
         local bDist = (hr.Position - bp).Magnitude
 
-        if bDist > CLASH.DEACT_GONE_DIST then return true end
+        if bDist > goneDist then return true end
         local deactRad = math.clamp(P.DEFLECT_R + 14, 18, 30)
         if bDist > deactRad then return true end
 
@@ -611,6 +616,15 @@ end
 function AutoClash.getState()   return S end
 function AutoClash.clashOn()    return S.clashOn end
 function AutoClash.getClashAt() return S.clashAt end
+
+function AutoClash.setClashOn(enabled, t)
+        if enabled then
+                local n = type(t) == "number" and t or _now()
+                if type(S.clashAt) ~= "number" then S.clashAt = n end
+                if type(S.clashHoldUntil) ~= "number" then S.clashHoldUntil = n + CLASH.HOLD end
+        end
+        S.clashOn = enabled and true or false
+end
 function AutoClash.snapshot()             return nil end
 function AutoClash.invalidateSnapshot()   end
 
