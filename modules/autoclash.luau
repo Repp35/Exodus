@@ -15,8 +15,8 @@ local CLASH = {
         DET_RAD_SPD_REF          = 120,
         DET_DOT_EMA              = 0.25,
         DET_DOT_THRESH           = 0.15,
-        DET_RETURN_FACTOR        = 1.3,
-        DET_TIMEOUT              = 1.2,
+        DET_RETURN_FACTOR        = 1.5,
+        DET_TIMEOUT              = 0.8,
         DASH_SPD_THRESH          = 50,
         DASH_SPD_CONFIRM         = 62,
         DASH_SPD_RELEASE         = 35,
@@ -205,10 +205,10 @@ local function tickReturnDetector(t, hr, ball)
                         S.detExitAt = t
                 end
         elseif S.detPhase == "EXITED" then
-                local limiar = S.detEntryTime * CLASH.DET_RETURN_FACTOR
+                local limiar = math.max((S.detEntryTime or 0) * CLASH.DET_RETURN_FACTOR, 0.15)
                 local reEntry = (isInside and not S.detWasInside) or (not isInside and dotComing)
                 if reEntry then
-                        if limiar > 0 and (t - S.detExitAt) <= limiar and dotComing then
+                        if (t - S.detExitAt) <= limiar and dotComing then
                                 S.detSignal = true
                         end
                         local entryTime = dist > 0.1 and (dist / spd) or 0.01
@@ -319,6 +319,7 @@ local function onTarget(newTarget, t)
         end
 end
 
+
 -- evaluate
 local function evaluateClash(t, hr, ball, Config)
         if not Config or Config.AutoClash == false or _G.PhantomManual then
@@ -333,11 +334,32 @@ local function evaluateClash(t, hr, ball, Config)
         if S.clashOn and shouldDeactivateClash(t, hr, ball) then
                 clearClash()
                 S.burstState, S.burstSignalDuringOn = "IDLE", false
-                return
+        end
+
+        -- reativação por proximidade (espelha v22 onBallSync)
+        -- se a bola está perto e vindo pra mim, religa o clash imediatamente
+        local preemptFire = false
+        if not S.clashOn
+                and isTargeted(S.lastTarget)
+                and (t - S.lastClashReact) >= CLASH.REACT_CD
+                and GameInfo and type(GameInfo.ballSpeed) == "function"
+                and type(GameInfo.tImpCompensated) == "function"
+                and hr and hr.Parent and ball and ball.Parent
+        then
+                local okS, speed = pcall(GameInfo.ballSpeed, ball, t)
+                if okS and type(speed) == "number" and speed > 1 then
+                        local bDist = (hr.Position - ball.Position).Magnitude
+                        if bDist <= CLASH.BALL_HARD_CAP then
+                                local okT, impactTime = pcall(GameInfo.tImpCompensated, bDist, speed)
+                                if okT and type(impactTime) == "number" and impactTime <= CLASH.OFF_FAST then
+                                        preemptFire = true
+                                end
+                        end
+                end
         end
 
         local antiDashActive = S.dashAnti.untilT > t
-        local canFire = (S.detSignal and isTargeted(S.lastTarget)) or antiDashActive
+        local canFire = preemptFire or (S.detSignal and isTargeted(S.lastTarget)) or antiDashActive
 
         if S.clashOn then
                 if S.burstState == "ON" and S.detSignal then
