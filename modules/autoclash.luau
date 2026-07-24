@@ -334,32 +334,11 @@ local function evaluateClash(t, hr, ball, Config)
         if S.clashOn and shouldDeactivateClash(t, hr, ball) then
                 clearClash()
                 S.burstState, S.burstSignalDuringOn = "IDLE", false
-        end
-
-        -- reativação por proximidade (espelha v22 onBallSync)
-        -- se a bola está perto e vindo pra mim, religa o clash imediatamente
-        local preemptFire = false
-        if not S.clashOn
-                and isTargeted(S.lastTarget)
-                and (t - S.lastClashReact) >= CLASH.REACT_CD
-                and GameInfo and type(GameInfo.ballSpeed) == "function"
-                and type(GameInfo.tImpCompensated) == "function"
-                and hr and hr.Parent and ball and ball.Parent
-        then
-                local okS, speed = pcall(GameInfo.ballSpeed, ball, t)
-                if okS and type(speed) == "number" and speed > 1 then
-                        local bDist = (hr.Position - ball.Position).Magnitude
-                        if bDist <= CLASH.BALL_HARD_CAP then
-                                local okT, impactTime = pcall(GameInfo.tImpCompensated, bDist, speed)
-                                if okT and type(impactTime) == "number" and impactTime <= CLASH.OFF_FAST then
-                                        preemptFire = true
-                                end
-                        end
-                end
+                return
         end
 
         local antiDashActive = S.dashAnti.untilT > t
-        local canFire = preemptFire or (S.detSignal and isTargeted(S.lastTarget)) or antiDashActive
+        local canFire = (S.detSignal and isTargeted(S.lastTarget)) or antiDashActive
 
         if S.clashOn then
                 if S.burstState == "ON" and S.detSignal then
