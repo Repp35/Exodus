@@ -13,9 +13,9 @@ local CLASH = {
         DET_RAD_MIN              = 10,
         DET_RAD_MAX              = 25,
         DET_RAD_SPD_REF          = 120,
-        DET_DOT_EMA              = 0.40,
-        DET_DOT_THRESH           = 0.35,
-        DET_RETURN_FACTOR        = 1.5,
+        DET_DOT_EMA              = 0.25,
+        DET_DOT_THRESH           = 0.15,
+        DET_RETURN_FACTOR        = 1.3,
         DET_TIMEOUT              = 1.2,
         DASH_SPD_THRESH          = 50,
         DASH_SPD_CONFIRM         = 62,
@@ -246,6 +246,10 @@ local function tickDotNeg(t, hr, ball)
 end
 
 local function shouldDeactivateClash(t, hr, ball)
+        if t < S.clashHoldUntil then
+                return false
+        end
+
         if not S.clashOn then return false end
 
         if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
@@ -340,7 +344,6 @@ local function evaluateClash(t, hr, ball, Config)
                         S.burstOnStart   = t
                         S.clashHoldUntil = t + CLASH.BURST_ON_MS
                 end
-                return
         end
 
         if S.burstState == "IDLE" then
