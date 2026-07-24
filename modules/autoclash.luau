@@ -91,7 +91,6 @@ end
 local function clearClash()
         S.clashOn        = false
         S.clashHoldUntil = 0
-        S.dotNegStart    = nil
         S.burstState     = "IDLE"
         S.burstSignalDuringOn = false
 end
@@ -225,40 +224,49 @@ local function tickReturnDetector(t, hr, ball)
         S.detWasInside = isInside
 end
 
+local function isBallApproaching(hrp, ball)
+        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+        if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return true end
+        local toMe = hrp.Position - ball.Position
+        if toMe.Magnitude < 1 then return true end
+        return av:Dot(toMe.Unit) > 0.25
+end
+
+local function deactTimpMax(spd)
+        if spd < 1 then return 0.30 end
+        local s = math.clamp(60 / spd, 0.2, 2.5)
+        return math.clamp(0.30 * s, 0.08, 0.40)
+end
+
 local function shouldDeactivateClash(t, hr, ball)
-        if t < S.clashHoldUntil then
-                return false
-        end
-
         if not S.clashOn then return false end
-
+        if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
         if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
-
         if not getLocalHumanoid() then return true end
         if not (ball and ball.Parent) then return true end
         if not (hr and hr.Parent) then return true end
 
-        if (hr.Position - ball.Position).Magnitude > CLASH.DEACT_GONE_DIST then
-                return true
-        end
+        local bp, spd = ball.Position, 0
+        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+        if ok and typeof(av) == "Vector3" then spd = av.Magnitude end
+        local bDist = (hr.Position - bp).Magnitude
 
-        if S.burstState == "IDLE" and S.detPhase == "EXITED" then
-                local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-                if ok and typeof(av) == "Vector3" and av.Magnitude > 1 then
-                        local toMe = hr.Position - ball.Position
-                        if toMe.Magnitude > 1 then
-                                local closing = av:Dot(toMe.Unit)
-                                if closing < -0.1 then
-                                        S.dotNegStart = S.dotNegStart or t
-                                        if (t - S.dotNegStart) >= CLASH.DEACT_DOT_HOLD then
-                                                return true
-                                        end
-                                else
-                                        S.dotNegStart = nil
-                                end
-                        end
+        if bDist > CLASH.DEACT_GONE_DIST then return true end
+        local deactRad = math.clamp(P.DEFLECT_R + 14, 18, 30)
+        if bDist > deactRad then return true end
+
+        local tImp = math.huge
+        if spd > 1 then
+                local fnTIC = GameInfo and GameInfo.tImpCompensated
+                if type(fnTIC) == "function" then
+                        local okT, v = pcall(fnTIC, bDist, spd)
+                        if okT and type(v) == "number" then tImp = v end
                 end
         end
+        if tImp > deactTimpMax(spd) then return true end
+
+        if not isBallApproaching(hr, ball) and bDist > 15 then return true end
+        if spd < 1 and bDist > 20 then return true end
 
         return false
 end
@@ -625,7 +633,6 @@ function AutoClash.resetState()
         S.burstOffStart     = 0
         S.burstSignalDuringOn = false
         S.dashAnti          = { untilT = 0, src = nil }
-        S.dotNegStart       = nil
 end
 
 return AutoClash
