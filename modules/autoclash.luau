@@ -18,7 +18,7 @@ local CLASH = {
     DET_RAD_SPD_REF          = 120,
     DET_DOT_EMA              = 0.25,
     DET_DOT_THRESH           = 0.15,
-    DET_RETURN_FACTOR        = 1.3,
+    DET_RETURN_FACTOR        = 1.5,
     DET_TIMEOUT              = 0.8,
     RING_FRESH_MAX           = 0.6,
 
@@ -89,6 +89,7 @@ local CLASH_SNAPSHOT_TTL = 0.05
 
 local S = {
     lastTarget      = -999,
+    lastTargetAt    = 0,
     targetRing      = table.create(RING_BUF, 0),
     targetRingIdx   = 0,
     targetCps       = 0,
@@ -97,8 +98,12 @@ local S = {
     clashOn         = false,
     clashAt         = 0,
     clashHoldUntil  = 0,
+    clashOffAt      = 0,
     lastClashReact  = 0,
     lastClashOffAt  = 0,
+
+    lastFireAt      = 0,
+    teleportLockUntil = 0,
 
     burstState          = "IDLE",
     burstOnStart        = 0,
@@ -118,7 +123,7 @@ local S = {
     dashEvents      = {},
     dashPanicUntil  = 0,
 
-    dashAnti        = { untilT = 0, src = nil },
+    dashAnti        = { untilT = 0, src = nil, at = 0 },
 
     lastFlowAt      = 0,
     panicHoldUntil  = 0,
@@ -211,12 +216,14 @@ local function activateBurst(t, Config)
     S.clashAt             = t
     S.clashHoldUntil      = t + CLASH.BURST_ON_MS
     S.lastClashReact      = t
+    S.clashOffAt          = 0
     if _G.PhantomOnBurst then pcall(_G.PhantomOnBurst) end
 end
 
 local function clearClash()
     local t = _now()
     S.clashOn, S.clashHoldUntil = false, 0
+    S.clashOffAt = t
     S.lastClashOffAt = t
     S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
     S.maintEma = 0
@@ -405,11 +412,7 @@ local function maintStep(t, ctx)
         return "REFRESH"
     end
 
-    if ctx.bDist <= ctx.maintRad then
-        return "HOLD"
-    end
-
-    return "OFF"
+    return "HOLD"
 end
 
 -- DESATIVAÇÃO
@@ -458,6 +461,7 @@ local function onTarget(newTarget, t)
     if type(newTarget) ~= "number" then return end
     local previousTarget = S.lastTarget
     S.lastTarget = newTarget
+    S.lastTargetAt = t
     ringPush(t)
     local ap = getAutoParryState()
     if ap then ap.armed = (newTarget == _localUserId) end
@@ -513,9 +517,10 @@ local function evaluateClash(t, hr, ball, Config)
             S.burstSignalDuringOn = false
             S.clashHoldUntil      = t + CLASH.BURST_ON_MS
             S.burstState          = "ON"
+            S.lastClashReact      = t
             S.lastFlowAt          = t
             return
-        elseif step == "HOLD" then
+        else
             if S.burstState == "ON" and S.detSignal then S.burstSignalDuringOn = true end
             if S.burstState == "ON" and (t - S.burstOnStart) >= CLASH.BURST_ON_MS then
                 if S.burstSignalDuringOn then
@@ -525,15 +530,10 @@ local function evaluateClash(t, hr, ball, Config)
                 else
                     S.burstState, S.burstOffStart = "OFF", t
                 end
-            end
-            return
-        else
-            if S.burstState == "OFF" then
+            elseif S.burstState == "OFF" then
                 if (t - S.burstOffStart) >= CLASH.BURST_OFF_MS then
                     S.burstState = "IDLE"
                 end
-            elseif S.burstState == "ON" then
-                S.burstState, S.burstOffStart = "OFF", t
             end
             return
         end
@@ -544,12 +544,14 @@ local function evaluateClash(t, hr, ball, Config)
     if checkPanicRadius(t, ctx) then
         activateBurst(t, Config)
         S.clashHoldUntil = t + CLASH.PANIC_HOLD_RADIUS
+        S.lastClashReact = t
         return
     end
 
     if antiDashActive and checkPanicDash(t, ctx, S.dashAnti.src and S.dashAnti.src.UserId) then
         activateBurst(t, Config)
         S.clashHoldUntil = t + CLASH.PANIC_HOLD_DASH
+        S.lastClashReact = t
         return
     end
 
@@ -557,6 +559,7 @@ local function evaluateClash(t, hr, ball, Config)
         if ctx and ctx.valid and ctx.targeted and ctx.bDist <= ctx.rad then
             activateBurst(t, Config)
             S.clashHoldUntil = t + CLASH.PANIC_HOLD_TARGET
+            S.lastClashReact = t
             return
         end
     end
@@ -564,9 +567,67 @@ local function evaluateClash(t, hr, ball, Config)
     if S.detSignal and isTargeted() then
         activateBurst(t, Config)
         S.clashHoldUntil = t + CLASH.BURST_ON_MS
+        S.lastClashReact = t
         return
     end
 end
+
+-- DESATIVAÇÃO COMPLETA (v22)
+local function shouldDeactivateClash(t, ctx)
+    if not S.clashOn then return false end
+    if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
+    if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
+    if t < S.teleportLockUntil then return true end
+    local hum = getLocalHumanoid()
+    if not hum then return true end
+    if not (ctx and ctx.valid) then return true end
+    if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return true end
+    local deactRad = math.clamp((P.DEFLECT_R or 8.5) + 14, 18, 30)
+    if ctx.bDist > deactRad then return true end
+    if ctx.tImp > (ctx.spd > 0 and ((0.30 * 60) / math.max(ctx.spd, 1)) or 0.40) then return true end
+    if S.detPhase == "EXITED" then
+        local returnWindow = math.max(
+            (S.detEntryTime or 0) * CLASH.DEACT_RETURN_FACTOR,
+            CLASH.DEACT_RETURN_FLOOR
+        )
+        if (t - S.detExitAt) > returnWindow then
+            if isTargeted() then
+                if S.targetHoldOffAt == 0 then S.targetHoldOffAt = t end
+                if (t - S.targetHoldOffAt) < CLASH.DEACT_HOLD_OFF_MS then
+                    return false
+                end
+            else
+                S.targetHoldOffAt = 0
+            end
+            return true
+        end
+    end
+    return false
+end
+
+-- FAST-PATH INLINE (chamado do onBallSync do v22.1, reativa em ~0ms)
+local _INF = math.huge
+function AutoClash.tryInlineActivate(t, hr, ball, Config)
+    if S.clashOn then return end
+    if not Config or Config.AutoClash == false or _G.PhantomManual then return end
+    if (t - S.lastClashReact) < CLASH.REACT_CD then return end
+    if S.burstState ~= "IDLE" then return end
+    if not (hr and hr.Parent and ball and ball.Parent) then return end
+    local bp = ball.Position
+    local bDist = (hr.Position - bp).Magnitude
+    if bDist > CLASH.BALL_HARD_CAP then return end
+    local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+    if not (ok and typeof(av) == "Vector3") then return end
+    local speed = av.Magnitude
+    local impactTime = speed > 1 and (bDist / speed) or _INF
+    if bDist <= CLASH.BALL_HARD_CAP and impactTime <= CLASH.OFF_FAST then
+        activateBurst(t, Config)
+        S.clashHoldUntil = t + CLASH.HOLD
+        S.lastClashReact = t
+    end
+end
+function AutoClash.setTeleportLock(t) S.teleportLockUntil = t + 0.20 end
+function AutoClash.recordFire(t) S.lastFireAt = t end
 
 -- DASH TRACKING
 local function updateDashTrack(t, Players)
@@ -778,16 +839,17 @@ function AutoClash.snapshot()             return clashSnapshot() end
 function AutoClash.invalidateSnapshot()   _ctxCache.valid = false end
 
 function AutoClash.resetState()
-    S.clashOn, S.clashAt, S.clashHoldUntil, S.lastClashReact = false, 0, 0, 0
+    S.clashOn, S.clashAt, S.clashHoldUntil, S.clashOffAt, S.lastClashReact = false, 0, 0, 0, 0
     S.lastClashOffAt = 0
     S.targetRingIdx, S.targetCps = 0, 0
+    S.lastTargetAt, S.lastFireAt, S.teleportLockUntil = 0, 0, 0
     for i = 1, RING_BUF do S.targetRing[i] = 0 end
     table.clear(S.dashEvents)
     S.dashPanicUntil = 0
     S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt = "IDLE", 0, 0, 0
     S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
     S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
-    S.dashAnti = { untilT = 0, src = nil }
+    S.dashAnti = { untilT = 0, src = nil, at = 0 }
     S.panicHoldUntil = 0
     S.lastFlowAt = 0
     S.targetHoldOffAt = 0
@@ -796,4 +858,14 @@ function AutoClash.resetState()
     _ctxCache.valid = false
 end
 
+-- API EXPANDIDA
+function AutoClash.tryInlineActivate(t, hr, ball, prevTarget, Config)
+    tryInlineActivate(t, hr, ball, prevTarget, Config)
+end
+function AutoClash.setTeleportLock(t) setTeleportLock(t) end
+function AutoClash.getLastTargetAt() return S.lastTargetAt end
+function AutoClash.getTeleportLock() return S.teleportLockUntil end
+function AutoClash.getClashOffAt() return S.clashOffAt end
+function AutoClash.getLastFireAt() return S.lastFireAt end
+function AutoClash.recordFire(t) S.lastFireAt = t end
 return AutoClash
