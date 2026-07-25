@@ -41,6 +41,10 @@ local CLASH = {
         ANTIDASH_COOLDOWN        = 0.35,
         DEACT_GONE_FACTOR        = 1.5,
         DEACT_NOTARGET_FACTOR    = 1.2,
+        DEACT_RETURN_FACTOR      = 4.0,
+        CLASH_REACTIVATE_CD      = 0.120,
+        T_IMP_CAP_BASE           = 0.090,
+        T_IMP_CAP_FLOOR          = 0.050,
         DEACT_STOP_DIST          = 12,
         DEACT_STOP_SPD           = 3,
         DEACT_TIMP_MIN           = 0.08,
@@ -100,6 +104,7 @@ local S = {
         dashAnti        = { untilT = 0, src = nil },
         dotLeaveStart   = -1,
         targetGraceAt   = 0,
+        clashOffAt      = 0,
 }
 
 -- helpers
@@ -133,14 +138,16 @@ local function isTargeted()
 end
 
 local function clearClash()
+        local t = _now()
         S.clashOn, S.clashHoldUntil = false, 0
+        S.clashOffAt = t
         -- reset de burst: sem isso, na próxima reativação o branch
         -- errado de burstState é pego e activateBurst nunca dispara de novo
         S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
-        -- reset do detector: detSignal/detPhase velhos podiam reativar
-        -- o clash no tick seguinte mesmo sem a bola estar perto
-        S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt = "IDLE", 0, 0, 0
-        S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
+        -- NÃO resetar detPhase, detDotEma etc: o detector é independente
+        -- do clash. Em clash real a bola está quicando; resetar o detector
+        -- o forçaria a passar por IDLE→INSIDE→EXITED de novo e perderia
+        -- o sinal entre ciclos.
         S.dotLeaveStart = -1
 end
 
@@ -345,8 +352,11 @@ local function shouldDeactivateClash()
         if dist > rad * 2.0 then wantDeact = true end
 
         -- Critério 2: Bola saiu do raio e não retornou na janela de retorno
+        -- DEACT_RETURN_FACTOR (4.0) >> DET_RETURN_FACTOR (1.3): a janela
+        -- de tolerância para desativar é 3x maior que a janela de clash,
+        -- evitando desativações por oscilação de 1-2 frames.
         if S.detPhase == "EXITED" then
-                local returnWindow = (S.detEntryTime or 0) * CLASH.DET_RETURN_FACTOR
+                local returnWindow = (S.detEntryTime or 0) * CLASH.DEACT_RETURN_FACTOR
                 local elapsed = t - S.detExitAt
                 if elapsed > returnWindow then wantDeact = true end
         end
@@ -401,8 +411,12 @@ local function onTarget(newTarget, t)
         if not (okP and okS) then return end
         local bDist = (hr.Position - bp).Magnitude
         local impactTime = speed > 1 and fnTIC(bDist, speed) or math.huge
+        -- tImpCap escala com a velocidade da bola: bola rápida exige
+        -- janela menor (clash mais "agressivo"). Cap floor protege
+        -- contra bola devagar.
+        local tImpCap = math.max(CLASH.T_IMP_CAP_FLOOR, CLASH.T_IMP_CAP_BASE * (60 / math.max(speed, 1)))
         if bDist <= CLASH.BALL_HARD_CAP
-                and impactTime <= CLASH.OFF_FAST
+                and impactTime <= tImpCap
                 and (t - S.lastClashReact) >= CLASH.REACT_CD
         then
                 activateBurst(t, Config)
@@ -424,12 +438,16 @@ local function evaluateClash(t, hr, ball, Config)
                 return
         end
         if S.clashOn then
-                if S.burstState == "ON" and S.detSignal then
-                        S.burstOnStart        = t
-                        S.clashHoldUntil      = t + CLASH.BURST_ON_MS
+                -- detector renova o hold enquanto o clash está ativo
+                if S.detSignal then
+                        S.burstOnStart   = t
+                        S.clashHoldUntil = t + CLASH.BURST_ON_MS
                 end
                 return
         end
+        -- cooldown mínimo após desativar antes de poder reativar;
+        -- impede o ciclo rápido de liga/desliga durante clash real
+        if (t - S.clashOffAt) < CLASH.CLASH_REACTIVATE_CD then return end
         local antiDashActive = S.dashAnti.untilT > t
         local canFire = (S.detSignal and isTargeted()) or antiDashActive
         if S.burstState == "IDLE" then
@@ -666,6 +684,7 @@ function AutoClash.resetState()
         S.dashAnti = { untilT = 0, src = nil }
         S.dotLeaveStart = -1
         S.targetGraceAt = 0
+        S.clashOffAt = 0
         _ctxCache.valid = false
 end
 
