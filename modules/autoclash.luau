@@ -11,7 +11,6 @@ local CLASH = {
         CPS_THRESH               = 8,
         OFF_FAST                 = 0.050,
         MAX_HOLD                 = 1.2,
-        TARGET_GRACE             = 0.15,
         BURST_ON_MS              = 0.080,
         BURST_OFF_MS             = 0.060,
         SPAM_PRE_FILL_FRAMES     = 4,
@@ -39,23 +38,14 @@ local CLASH = {
         ANTIDASH_PANIC_HOLD      = 0.45,
         ANTIDASH_PANIC_MAX       = 1.2,
         ANTIDASH_COOLDOWN        = 0.35,
-        DEACT_GONE_FACTOR        = 1.5,
-        DEACT_NOTARGET_FACTOR    = 1.2,
         DEACT_RETURN_FACTOR      = 4.0,
+        DEACT_RETURN_FLOOR       = 0.250,
         CLASH_REACTIVATE_CD      = 0.120,
-        PANIC_MIN_HOLD           = 0.100,
+        PANIC_HOLD_MS            = 0.100,
+        FLOW_PROTECT_MS          = 0.150,
+        DEACT_HOLD_OFF_MS        = 0.150,
         T_IMP_CAP_BASE           = 0.090,
         T_IMP_CAP_FLOOR          = 0.050,
-        DEACT_STOP_DIST          = 12,
-        DEACT_STOP_SPD           = 3,
-        DEACT_TIMP_MIN           = 0.08,
-        DEACT_TIMP_MAX           = 0.25,
-        DEACT_TIMP_FACTOR        = 1.3,
-        DEACT_RETURN_FLOOR_MS    = 0.350,
-        DEACT_DOT_ENTER          = -0.30,
-        DEACT_DOT_EXIT           = -0.15,
-        DEACT_DOT_HOLD           = 0.350,
-        DEACT_DOT_MIN_SPD        = 1.0,
         RING_FRESH_MAX           = 0.6,
 }
 
@@ -103,10 +93,10 @@ local S = {
         burstOffStart   = 0,
         burstSignalDuringOn = false,
         dashAnti        = { untilT = 0, src = nil },
-        dotLeaveStart   = -1,
-        targetGraceAt   = 0,
-        clashOffAt      = 0,
-        panicUntil      = 0,
+        lastClashOffAt  = 0,
+        panicHoldUntil  = 0,
+        lastFlowAt      = 0,
+        targetHoldOffAt = 0,
 }
 
 -- helpers
@@ -127,11 +117,6 @@ local function updateTargetCps(t)
         S.targetCps = cnt / CLASH.CPS_WIN
 end
 
-local function deactTimpMax(spd)
-        if spd < 1 then return CLASH.DEACT_TIMP_MAX end
-        return math.clamp(CLASH.DEACT_TIMP_MAX / (spd / 60), CLASH.DEACT_TIMP_MIN, CLASH.DEACT_TIMP_MAX)
-end
-
 local function isTargeted()
         local fn = GameInfo and GameInfo.isTargeted
         if type(fn) ~= "function" then return false end
@@ -142,15 +127,8 @@ end
 local function clearClash()
         local t = _now()
         S.clashOn, S.clashHoldUntil = false, 0
-        S.clashOffAt = t
-        -- reset de burst: sem isso, na próxima reativação o branch
-        -- errado de burstState é pego e activateBurst nunca dispara de novo
+        S.lastClashOffAt = t
         S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
-        -- NÃO resetar detPhase, detDotEma etc: o detector é independente
-        -- do clash. Em clash real a bola está quicando; resetar o detector
-        -- o forçaria a passar por IDLE→INSIDE→EXITED de novo e perderia
-        -- o sinal entre ciclos.
-        S.dotLeaveStart = -1
 end
 
 local function getDetectorRadius(spd)
@@ -259,6 +237,7 @@ local function tickReturnDetector(t, hr, ball)
                 end
         end
         S.detWasInside = isInside
+        if S.detSignal then S.lastFlowAt = t end
 end
 
 -- snapshot
@@ -302,9 +281,6 @@ local function clashSnapshot()
                         if okC then tImp, spd = ti, s2 end
                 end
         end
-        -- panic trigger: bola dentro de raio_parry*0.5 e você é alvo → ativa
-        -- e segura por no mínimo PANIC_MIN_HOLD (100ms). Escala com a
-        -- velocidade via effectiveRadius (bola rápida = raio maior).
         local panicRad = effectiveRadius(spd) * 0.5
         local isPanic = (bDist <= panicRad) and isTargeted()
         _ctxCache.t, _ctxCache.valid = t, true
@@ -319,27 +295,6 @@ local function clashSnapshot()
 end
 
 -- deactivation
-local function trackDotLeaving(ball, hr, t)
-        local function reset() S.dotLeaveStart = -1 end
-        if not (ball and ball.Parent and hr and hr.Parent) then
-                reset(); return false
-        end
-        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-        if not (ok and typeof(av) == "Vector3") or av.Magnitude <= CLASH.DEACT_DOT_MIN_SPD then
-                reset(); return false
-        end
-        local toMe = hr.Position - ball.Position
-        if toMe.Magnitude < 0.1 then reset(); return false end
-        local dot = av:Dot(toMe.Unit)
-        if dot < CLASH.DEACT_DOT_ENTER then
-                if S.dotLeaveStart < 0 then S.dotLeaveStart = t end
-                return (t - S.dotLeaveStart) > CLASH.DEACT_DOT_HOLD
-        elseif dot > CLASH.DEACT_DOT_EXIT then
-                reset(); return false
-        end
-        return S.dotLeaveStart >= 0 and ((t - S.dotLeaveStart) > CLASH.DEACT_DOT_HOLD) or false
-end
-
 local function shouldDeactivateClash()
         if not S.clashOn then return false end
         local t = _now()
@@ -355,34 +310,47 @@ local function shouldDeactivateClash()
         local spd  = ctx.spd or 0
         local rad  = effectiveRadius(spd)
 
-        local wantDeact = false
-
-        -- Critério 1: Bola escapou de vez (muito longe)
-        if dist > rad * 2.0 then wantDeact = true end
-
-        -- Critério 2: Bola saiu do raio e não retornou na janela de retorno
-        -- DEACT_RETURN_FACTOR (4.0) >> DET_RETURN_FACTOR (1.3): a janela
-        -- de tolerância para desativar é 3x maior que a janela de clash,
-        -- evitando desativações por oscilação de 1-2 frames.
-        if S.detPhase == "EXITED" then
-                local returnWindow = (S.detEntryTime or 0) * CLASH.DEACT_RETURN_FACTOR
-                local elapsed = t - S.detExitAt
-                if elapsed > returnWindow then wantDeact = true end
+        if S.detSignal or (S.panicHoldUntil and t < S.panicHoldUntil) then
+                if (t - S.lastFlowAt) > CLASH.FLOW_PROTECT_MS then
+                        S.lastFlowAt = t
+                end
         end
-
-        if not wantDeact then
-                S.targetGraceAt = 0
+        if (t - S.lastFlowAt) < CLASH.FLOW_PROTECT_MS then
                 return false
         end
 
-        -- Algum critério pediu pra desativar. Se ainda sou o target, espera o grace.
-        if isTargeted() then
-                if S.targetGraceAt == 0 then S.targetGraceAt = t end
-                if (t - S.targetGraceAt) < CLASH.TARGET_GRACE then
-                        return false
+        if dist > rad * 2.0 then
+                if isTargeted() then
+                        if S.targetHoldOffAt == 0 then S.targetHoldOffAt = t end
+                        if (t - S.targetHoldOffAt) < CLASH.DEACT_HOLD_OFF_MS then
+                                return false
+                        end
+                else
+                        S.targetHoldOffAt = 0
+                end
+                return true
+        end
+        S.targetHoldOffAt = 0
+
+        if S.detPhase == "EXITED" then
+                local returnWindow = math.max(
+                        (S.detEntryTime or 0) * CLASH.DEACT_RETURN_FACTOR,
+                        CLASH.DEACT_RETURN_FLOOR
+                )
+                if (t - S.detExitAt) > returnWindow then
+                        if isTargeted() then
+                                if S.targetHoldOffAt == 0 then S.targetHoldOffAt = t end
+                                if (t - S.targetHoldOffAt) < CLASH.DEACT_HOLD_OFF_MS then
+                                        return false
+                                end
+                        else
+                                S.targetHoldOffAt = 0
+                        end
+                        return true
                 end
         end
-        return true
+
+        return false
 end
 
 -- burst
@@ -394,7 +362,6 @@ local function activateBurst(t, Config)
         S.clashAt             = t
         S.clashHoldUntil      = t + CLASH.BURST_ON_MS
         S.lastClashReact      = t
-        S.dotLeaveStart       = -1
         if _G.PhantomOnBurst then pcall(_G.PhantomOnBurst) end
 end
 
@@ -420,9 +387,6 @@ local function onTarget(newTarget, t)
         if not (okP and okS) then return end
         local bDist = (hr.Position - bp).Magnitude
         local impactTime = speed > 1 and fnTIC(bDist, speed) or math.huge
-        -- tImpCap escala com a velocidade da bola: bola rápida exige
-        -- janela menor (clash mais "agressivo"). Cap floor protege
-        -- contra bola devagar.
         local tImpCap = math.max(CLASH.T_IMP_CAP_FLOOR, CLASH.T_IMP_CAP_BASE * (60 / math.max(speed, 1)))
         if bDist <= CLASH.BALL_HARD_CAP
                 and impactTime <= tImpCap
@@ -447,30 +411,25 @@ local function evaluateClash(t, hr, ball, Config)
                 return
         end
         if S.clashOn then
-                -- detector renova o hold enquanto o clash está ativo
                 if S.detSignal then
                         S.burstOnStart   = t
                         S.clashHoldUntil = t + CLASH.BURST_ON_MS
                 end
                 return
         end
-        -- cooldown mínimo após desativar antes de poder reativar;
-        -- impede o ciclo rápido de liga/desliga durante clash real
-        if (t - S.clashOffAt) < CLASH.CLASH_REACTIVATE_CD then return end
+        if S.lastClashOffAt > 0 and (t - S.lastClashOffAt) < CLASH.CLASH_REACTIVATE_CD then return end
         local antiDashActive = S.dashAnti.untilT > t
         local ctxPanic = _ctxCache
         local isPanic = ctxPanic and ctxPanic.valid and ctxPanic.isPanic or false
         local canFire = (S.detSignal and isTargeted())
                 or antiDashActive
                 or isPanic
-        -- panic: segura o sinal por no mínimo PANIC_MIN_HOLD pra não
-        -- desativar por oscilação de 1 frame; o return detector assume
-        -- o controle depois.
         if isPanic then
-                S.panicUntil = t + CLASH.PANIC_MIN_HOLD
+                S.panicHoldUntil = t + CLASH.PANIC_HOLD_MS
         end
-        if S.panicUntil and t < S.panicUntil then
+        if S.panicHoldUntil and t < S.panicHoldUntil then
                 canFire = true
+                S.lastFlowAt = t
         end
         if S.burstState == "IDLE" then
                 if canFire then activateBurst(t, Config) end
@@ -704,10 +663,10 @@ function AutoClash.resetState()
         S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
         S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
         S.dashAnti = { untilT = 0, src = nil }
-        S.dotLeaveStart = -1
-        S.targetGraceAt = 0
-        S.clashOffAt = 0
-        S.panicUntil = 0
+        S.lastClashOffAt = 0
+        S.panicHoldUntil = 0
+        S.lastFlowAt = 0
+        S.targetHoldOffAt = 0
         _ctxCache.valid = false
 end
 
