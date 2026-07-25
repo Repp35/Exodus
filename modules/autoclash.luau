@@ -43,6 +43,7 @@ local CLASH = {
         DEACT_NOTARGET_FACTOR    = 1.2,
         DEACT_RETURN_FACTOR      = 4.0,
         CLASH_REACTIVATE_CD      = 0.120,
+        PANIC_MIN_HOLD           = 0.100,
         T_IMP_CAP_BASE           = 0.090,
         T_IMP_CAP_FLOOR          = 0.050,
         DEACT_STOP_DIST          = 12,
@@ -105,6 +106,7 @@ local S = {
         dotLeaveStart   = -1,
         targetGraceAt   = 0,
         clashOffAt      = 0,
+        panicUntil      = 0,
 }
 
 -- helpers
@@ -300,12 +302,19 @@ local function clashSnapshot()
                         if okC then tImp, spd = ti, s2 end
                 end
         end
+        -- panic trigger: bola dentro de raio_parry*0.5 e você é alvo → ativa
+        -- e segura por no mínimo PANIC_MIN_HOLD (100ms). Escala com a
+        -- velocidade via effectiveRadius (bola rápida = raio maior).
+        local panicRad = effectiveRadius(spd) * 0.5
+        local isPanic = (bDist <= panicRad) and isTargeted()
         _ctxCache.t, _ctxCache.valid = t, true
         _ctxCache.hr = hr
         _ctxCache.ball, _ctxCache.bp = ball, bp
         _ctxCache.nearest, _ctxCache.nearestAlive = nearest, nearestAlive
         _ctxCache.bDist, _ctxCache.panic = bDist, panic
         _ctxCache.tImp, _ctxCache.spd = tImp, spd
+        _ctxCache.isPanic = isPanic
+        _ctxCache.panicRad = panicRad
         return _ctxCache
 end
 
@@ -449,7 +458,20 @@ local function evaluateClash(t, hr, ball, Config)
         -- impede o ciclo rápido de liga/desliga durante clash real
         if (t - S.clashOffAt) < CLASH.CLASH_REACTIVATE_CD then return end
         local antiDashActive = S.dashAnti.untilT > t
-        local canFire = (S.detSignal and isTargeted()) or antiDashActive
+        local ctxPanic = _ctxCache
+        local isPanic = ctxPanic and ctxPanic.valid and ctxPanic.isPanic or false
+        local canFire = (S.detSignal and isTargeted())
+                or antiDashActive
+                or isPanic
+        -- panic: segura o sinal por no mínimo PANIC_MIN_HOLD pra não
+        -- desativar por oscilação de 1 frame; o return detector assume
+        -- o controle depois.
+        if isPanic then
+                S.panicUntil = t + CLASH.PANIC_MIN_HOLD
+        end
+        if S.panicUntil and t < S.panicUntil then
+                canFire = true
+        end
         if S.burstState == "IDLE" then
                 if canFire then activateBurst(t, Config) end
         elseif S.burstState == "ON" then
@@ -685,6 +707,7 @@ function AutoClash.resetState()
         S.dotLeaveStart = -1
         S.targetGraceAt = 0
         S.clashOffAt = 0
+        S.panicUntil = 0
         _ctxCache.valid = false
 end
 
