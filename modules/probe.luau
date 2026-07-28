@@ -120,30 +120,10 @@ local function resolveRemote()
     if validRemote(parryR) then
         return parryR, parryMode
     end
-    local did = rawget(getGlobal(), "did")
-    if validRemote(did) then
-        return cacheRemote(did, "buffer")
-    end
-    if Remotes then
-        local r = Remotes:FindFirstChild("pr_" .. tostring(Players.LocalPlayer.UserId))
-        if validRemote(r) then
-            return cacheRemote(r, "buffer")
-        end
-    end
-    if GenRemotes then
-        local r = GenRemotes:FindFirstChild("RE_1")
-        if validRemote(r) then
-            return cacheRemote(r, "event")
-        end
-    end
     local tt = Replicated:FindFirstChild("TouchTap")
-    if typeof(tt) == "Instance" and tt.Parent ~= nil then
-        if tt:IsA("RemoteEvent") then
-            return cacheRemote(tt, "event")
-        end
-        if tt:IsA("BindableEvent") or tt:IsA("BindableFunction") then
-            return cacheRemote(tt, "event")
-        end
+    if typeof(tt) == "Instance" and tt.Parent ~= nil
+        and (tt:IsA("RemoteEvent") or tt:IsA("BindableEvent")) then
+        return cacheRemote(tt, "event")
     end
     return nil
 end
