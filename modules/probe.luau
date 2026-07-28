@@ -1,4 +1,4 @@
---[[ Probe v2 ]]
+--[[ Probe ]]
 
 local Probe = {}
 
@@ -7,22 +7,61 @@ local Replicated = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 
 -- state
-local TSFolder, Remotes = nil, nil
-local ReqDef = nil
+local TSFolder, Remotes, GenRemotes, abilFolder = nil, nil, nil, nil
+local Deflect = nil
+local parryR, parryMode, parryInit = nil, nil, false
+local _buf1, _buf2 = nil, nil
 local _warnLast, _warnGap = 0, 5
 local _now = os.clock
+
+-- safeReq
+local function safeReq(m)
+    if not (m and m:IsA("ModuleScript")) then
+        return nil
+    end
+    local ok, r = pcall(require, m)
+    return ok and r or nil
+end
 
 -- refreshRefs
 local function refreshRefs()
     if not (TSFolder and TSFolder.Parent) then
         TSFolder = Replicated:FindFirstChild("TS")
+        GenRemotes = TSFolder and TSFolder:FindFirstChild("GeneratedNetworkRemotes")
+        abilFolder = TSFolder and TSFolder:FindFirstChild("Abilities")
+        if abilFolder then
+            local mod = safeReq(abilFolder:FindFirstChild("DeflectAbility")) or {}
+            Deflect = (type(mod) == "table" and mod.DeflectAbility) or mod
+            if type(Deflect) ~= "table" then
+                Deflect = nil
+            end
+        end
     end
     if not (Remotes and Remotes.Parent) then
         Remotes = Replicated:FindFirstChild("Remotes")
     end
-    if Remotes and (not ReqDef or not ReqDef.Parent) then
-        ReqDef = Remotes:FindFirstChild("ReqDef")
+end
+
+-- _initBufs
+local function _initBufs()
+    if type(buffer) ~= "table" then
+        return
     end
+    if type(buffer.fromstring) == "function" then
+        _buf1 = buffer.fromstring("\1")
+        _buf2 = buffer.fromstring("\2")
+    elseif type(buffer.create) == "function" and type(buffer.writeu8) == "function" then
+        _buf1 = buffer.create(1)
+        buffer.writeu8(_buf1, 0, 1)
+        _buf2 = buffer.create(1)
+        buffer.writeu8(_buf2, 0, 2)
+    end
+end
+_initBufs()
+
+-- makeBuf
+local function makeBuf(flag)
+    return flag == 2 and _buf2 or _buf1
 end
 
 -- validRemote
@@ -30,20 +69,130 @@ local function validRemote(r)
     return typeof(r) == "Instance" and r.Parent ~= nil and r:IsA("RemoteEvent")
 end
 
--- resolveReqDef
-local function resolveReqDef()
-    refreshRefs()
-    if validRemote(ReqDef) then
-        return ReqDef
+-- getGlobal
+local function getGlobal()
+    if type(getfenv) ~= "function" or type(Deflect) ~= "table" then
+        return _G
     end
-    ReqDef = nil
+    local candidates = {"Deflect", "OnClientCreate", "constructor"}
+    for _, name in ipairs(candidates) do
+        local fn = Deflect[name]
+        if type(fn) == "function" then
+            local ok, env = pcall(getfenv, fn)
+            if ok and type(env) == "table" then
+                local g = rawget(env, "_G")
+                return (type(g) == "table" and g or env)
+            end
+        end
+    end
+    return _G
+end
+
+-- setGlobal
+local function setGlobal(k, v)
+    local g = getGlobal()
+    if type(g) == "table" then
+        rawset(g, k, v)
+    end
+end
+
+-- cacheRemote
+local function cacheRemote(r, mode)
+    if not validRemote(r) then
+        return nil
+    end
+    if r.Name == "RE_1" then
+        mode = "event"
+    end
+    parryR, parryMode = r, mode
+    if mode == "buffer" then
+        setGlobal("did", r)
+    end
+    return r, mode
+end
+
+-- resolveRemote
+local function resolveRemote()
+    refreshRefs()
+    if parryR and (not parryR.Parent or not parryR:IsA("RemoteEvent")) then
+        parryR, parryMode, parryInit = nil, nil, false
+    end
+    if validRemote(parryR) then
+        return parryR, parryMode
+    end
+    local did = rawget(getGlobal(), "did")
+    if validRemote(did) then
+        return cacheRemote(did, "buffer")
+    end
     if Remotes then
-        ReqDef = Remotes:FindFirstChild("ReqDef")
-        if validRemote(ReqDef) then
-            return ReqDef
+        local r = Remotes:FindFirstChild("pr_" .. tostring(Players.LocalPlayer.UserId))
+        if validRemote(r) then
+            return cacheRemote(r, "buffer")
+        end
+    end
+    if GenRemotes then
+        local r = GenRemotes:FindFirstChild("RE_1")
+        if validRemote(r) then
+            return cacheRemote(r, "event")
+        end
+    end
+    local tt = Replicated:FindFirstChild("TouchTap")
+    if typeof(tt) == "Instance" and tt.Parent ~= nil then
+        if tt:IsA("RemoteEvent") then
+            return cacheRemote(tt, "event")
+        end
+        if tt:IsA("BindableEvent") or tt:IsA("BindableFunction") then
+            return cacheRemote(tt, "event")
         end
     end
     return nil
+end
+
+-- probeNamedRemoteEvents
+local function probeNamedRemoteEvents()
+    local pools = {
+        {Remotes, {"did", "RE_Deflect", "Deflect"}},
+        {GenRemotes, {"RE_1", "RE_Deflect"}},
+        {TSFolder, {"Deflect", "RE_Deflect"}}
+    }
+    for _, pool in ipairs(pools) do
+        local folder, names = pool[1], pool[2]
+        if folder then
+            for _, n in ipairs(names) do
+                if type(n) == "string" then
+                    local r = folder:FindFirstChild(n)
+                    if validRemote(r) then
+                        return cacheRemote(r, (r.Name == "RE_1") and "event" or "buffer")
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- initParry
+local function initParry()
+    if parryInit then
+        return true
+    end
+    local r, m = resolveRemote()
+    if not r then
+        r, m = probeNamedRemoteEvents()
+    end
+    if not r then
+        return false
+    end
+    if m == "event" then
+        parryInit = true
+        return true
+    end
+    local p = makeBuf(2)
+    if not p then
+        return false
+    end
+    parryInit = pcall(r.FireServer, r, p)
+    return parryInit
 end
 
 -- phantomWarn
@@ -56,15 +205,28 @@ local function phantomWarn(tag, msg)
     warn(("[phantom_logic] %s: %s"):format(tag, tostring(msg)))
 end
 
--- fireParryImpl
--- Nota: payload vazio. Se o server esperar args, ajuste aqui.
-local function fireParryImpl(...)
-    local r = resolveReqDef()
-    if not r then
-        phantomWarn("fireParry", "ReqDef não encontrado")
+-- fireParry
+local function fireParry(r, m, flag)
+    if not validRemote(r) then
         return false
     end
-    local ok, err = pcall(r.FireServer, r, ...)
+    if m == "event" then
+        local ok, err = pcall(r.FireServer, r)
+        if not ok then
+            phantomWarn("fireParry.event", err)
+        end
+        return ok
+    end
+    local p = makeBuf(flag or 1)
+    if not p then
+        return false
+    end
+    local initOk, initialized = pcall(initParry)
+    if not initOk or not initialized then
+        phantomWarn("fireParry.init", "inicialização falhou")
+        return false
+    end
+    local ok, err = pcall(r.FireServer, r, p)
     if not ok then
         phantomWarn("fireParry.fire", err)
     end
@@ -103,7 +265,7 @@ local function bindBallSync(handler, track)
     return true
 end
 
--- tryConnectResilience (mantido igual)
+-- tryConnectResilience
 local function tryConnectResilience(track)
     track(
         workspace.DescendantAdded:Connect(
@@ -151,9 +313,15 @@ end
 
 -- revalidate
 local function revalidate()
-    if not (ReqDef and ReqDef:IsA("RemoteEvent") and ReqDef.Parent) then
-        ReqDef = nil
-        resolveReqDef()
+    if not (parryR and parryR:IsA("RemoteEvent") and parryR.Parent) then
+        parryR, parryMode, parryInit = nil, nil, false
+        local remote = resolveRemote()
+        if not remote then
+            remote = probeNamedRemoteEvents()
+        end
+        if remote then
+            initParry()
+        end
     end
     refreshRefs()
 end
@@ -162,45 +330,46 @@ end
 function Probe.refreshRefs()
     refreshRefs()
 end
-
 function Probe.resolveRemote()
-    return resolveReqDef()
+    return resolveRemote()
 end
-
-function Probe.fireParry(...)
-    return fireParryImpl(...)
+function Probe.probeNamed()
+    return probeNamedRemoteEvents()
 end
-
+function Probe.initParry()
+    return initParry()
+end
+function Probe.fireParry(flag)
+    return fireParry(parryR, parryMode, flag or 1)
+end
 function Probe.getRemote()
-    return ReqDef
+    return parryR, parryMode
 end
 
 function Probe.invalidate()
-    ReqDef = nil
+    parryR, parryMode, parryInit = nil, nil, false
 end
 
 function Probe.bindBallSync(handler, track)
     return bindBallSync(handler, track)
 end
-
 function Probe.connectBallSync(track)
     return connectBallSync(track)
 end
-
 function Probe.revalidate()
     revalidate()
 end
-
 function Probe.tryConnectResilience(track)
     tryConnectResilience(track)
 end
 
 function Probe.resolveIfStale(lastResolveAt, maxAge)
     local t = _now()
-    if validRemote(ReqDef) and (t - (lastResolveAt or 0)) <= (maxAge or 3.0) then
-        return ReqDef
+    if validRemote(parryR) and (t - (lastResolveAt or 0)) <= (maxAge or 3.0) then
+        return parryR, parryMode
     end
-    return resolveReqDef()
+    local r, m = resolveRemote()
+    return r, m
 end
 
 return Probe
