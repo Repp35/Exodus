@@ -1,11 +1,13 @@
 --[[ auto clash ]]
 
+-- módulo
 local AutoClash = {}
+
+-- dependências
 local Probe
 local GameInfo
 local Utils
 local AutoParry
-local P = nil
 
 -- tunings
 local CLASH = {
@@ -75,7 +77,7 @@ local CLASH = {
     PANIC_HOLD_MS            = 0.100,
 }
 
--- state
+-- estado
 local RING_BUF = 8
 
 local S = {
@@ -173,7 +175,7 @@ local function getParryBonus()
     return AutoParry.resRadiusBonus()
 end
 
-local function effectiveRadius(_)
+local function effectiveRadius(spd)
     return P.DEFLECT_R + getParryBonus()
 end
 
@@ -185,16 +187,8 @@ local function getBall()
     return GameInfo.getBall()
 end
 
-local function requireP()
-    if P ~= nil then return P end
-    if AutoParry and type(AutoParry.getP) == "function" then
-        P = AutoParry.getP()
-    end
-    return P
-end
-
 -- burst
-local function activateBurst(t, _)
+local function activateBurst(t, config)
     S.burstState          = "ON"
     S.burstOnStart        = t
     S.burstSignalDuringOn = false
@@ -203,6 +197,9 @@ local function activateBurst(t, _)
     S.clashHoldUntil      = t + CLASH.BURST_ON_MS
     S.lastClashReact      = t
     S.clashOffAt          = 0
+    -- Disparo real do parry: se ninguém registrou _G.PhantomOnBurst, faz um
+    -- fallback chamando AutoParry.fire() diretamente. Sem isso, o clash
+    -- ativava o estado mas NENHUM clique era disparado.
     local burst = _G.PhantomOnBurst
     if type(burst) == "function" then
         pcall(burst)
@@ -220,7 +217,7 @@ local function clearClash()
     S.maintEma = 0
 end
 
--- detector
+-- detector de retorno
 local function getDetectorRadius(spd)
     local t = math.clamp((spd or 0) / CLASH.DET_RAD_SPD_REF, 0, 1)
     return CLASH.DET_RAD_MIN + (CLASH.DET_RAD_MAX - CLASH.DET_RAD_MIN) * t
@@ -358,7 +355,7 @@ local function checkPanicDash(t, ctx, sourceUserId)
     return true
 end
 
--- maintenance
+-- manutenção
 local function updateMaintEma(t, hr, ball, ctx)
     local input = 0
     if ctx and ctx.valid and hr and hr.Parent and ball and ball.Parent then
@@ -395,7 +392,7 @@ local function maintStep(t, ctx)
     return "HOLD"
 end
 
--- deactivation
+-- desativação
 local function shouldDeactivateClash(t, ctx)
     if not S.clashOn then return false end
     if t < math.max(S.clashAt + CLASH.HOLD, S.clashHoldUntil) then return false end
@@ -408,9 +405,7 @@ local function shouldDeactivateClash(t, ctx)
     local MAX_BALL_DIST_TO_DEACTIVATE = 50
     if ctx.bDist > MAX_BALL_DIST_TO_DEACTIVATE then return true end
 
-    local p = requireP()
-    if p == nil then return false end
-    local deactRad = math.clamp(p.DEFLECT_R + 14, 18, 30)
+    local deactRad = math.clamp(P.DEFLECT_R + 14, 18, 30)
     if ctx.bDist > deactRad then return true end
 
     local tImpCap = ctx.spd > 0 and ((CLASH.T_IMP_CAP_BASE * 60) / math.max(ctx.spd, 1)) or CLASH.T_IMP_CAP_FLOOR
@@ -436,7 +431,7 @@ local function shouldDeactivateClash(t, ctx)
     return false
 end
 
--- target
+-- alvo
 local function onTarget(newTarget, t)
     if type(newTarget) ~= "number" then return end
     local previousTarget = S.lastTarget
@@ -460,7 +455,7 @@ local function onTarget(newTarget, t)
     end
 end
 
--- evaluation
+-- avaliação
 local function evaluateClash(t, hr, ball, config)
     if not config or config.AutoClash == false or Utils.isManualSpamActive() then
         if S.clashOn then clearClash() end
@@ -572,7 +567,7 @@ local function tryInlineActivate(t, hr, ball, config)
     end
 end
 
--- dash tracking
+-- rastreamento de dash
 local function updateDashTrack(t)
     if (t - _lastDashTrack) < CLASH.DASH_TRACK_INTERVAL then return end
     _lastDashTrack = t
@@ -693,10 +688,8 @@ local function reportDash(player)
     local php = ch:FindFirstChild("HumanoidRootPart")
     local myHRP = getMyHRP()
     if not (php and php.Parent and myHRP and myHRP.Parent) then return end
-    local p = requireP()
-    if p == nil then return end
     local rad = math.clamp(
-        p.DEFLECT_R + getParryBonus() + (p.ANTIDASH_BONUS or 0),
+        P.DEFLECT_R + getParryBonus() + (P.ANTIDASH_BONUS or 0),
         CLASH.ANTIDASH_RAD_MIN,
         CLASH.ANTIDASH_RAD_MAX
     )
@@ -717,8 +710,8 @@ end
 local function isDashAnimation(track)
     if not track or not track.Animation then return false end
     local n  = (track.Name or ""):lower()
-    local an = (track.Animation.Name or ""):lower()
-    return n:find("dash", 1, true) ~= nil or an:find("dash", 1, true) ~= nil
+    local an = track.Animation.Name:lower()
+    return n:find("dash", 1, true) or an:find("dash", 1, true) ~= nil
 end
 
 local function _hookPlayerAntiDash(player)
@@ -766,15 +759,13 @@ function AutoClash.setup(deps)
     AutoParry = deps.AutoParry
     local lp = Utils.getLocalPlayer()
     _localUserId = lp and lp.UserId or -1
-    if AutoParry and type(AutoParry.getP) == "function" then
-        P = AutoParry.getP()
-    end
+-- callbacks para utils
     Utils.setOnClashOn(function() return S.clashOn end)
     Utils.setOnTarget(onTarget)
     Utils.setOnTeleport(clearClash)
 end
 
--- api
+-- api pública
 function AutoClash.evaluate(t, hr, ball, config)
     evaluateClash(t, hr, ball, config)
 end
