@@ -23,7 +23,7 @@ local _oldNamecall, _oldIndex = nil, nil
 local _hookEnabled = true
 
 local DEFAULT_REMOTE_PATH = nil
-local DEFAULT_MODE = "buffer"
+local _remoteTrusted = false
 
 local CONFIG_FOLDER = "PhantomLogic"
 local CONFIG_PATH = CONFIG_FOLDER .. "/probe_config.json"
@@ -158,17 +158,40 @@ local function loadConfig()
 end
 
 -- cache / hook
-local function cacheRemote(r, mode)
+local function cacheRemote(r, mode, trusted)
     if not validRemote(r) then
         return nil
     end
     local changed = (parryR ~= r) or (parryMode ~= mode)
     parryR, parryMode = r, mode
     parryInit = false
+    -- Se veio de um FireServer com payload confirmado, marcamos como
+    -- trusted. Pool nomeado e config salvo ficam "untrusted" até o hook
+    -- de payload confirmar depois.
+    if trusted then
+        _remoteTrusted = true
+    end
     if changed then
         saveConfig()
     end
     return r, mode
+end
+
+-- Detecta o "payload de parry" da mesma forma que o invisible hub faz:
+-- o primeiro argumento precisa ser buffer OU string contendo o byte 0x01.
+-- Sem esse match, NÃO cacheia — foi essa a causa do erro "CFrame was
+-- passed" no Network (o remote cacheado era um RemoteEvent genérico
+-- chamado com CFrame, e o fireParry depois mandava um buffer pra ele).
+local function looksLikeParryPayload(a1)
+    local t = typeof(a1)
+    if t == "buffer" then
+        return true
+    end
+    if t == "string" then
+        local ok, found = pcall(string.find, a1, "\1", 1, true)
+        return ok and found ~= nil
+    end
+    return false
 end
 
 local function installHook()
@@ -179,33 +202,32 @@ local function installHook()
         return false
     end
     local ok, err = pcall(function()
+        -- Hook principal: __namecall. Igual ao invisible hub, só captura
+        -- o remote quando o payload realmente bate (buffer ou string com
+        -- \x01). Isso evita cachear o RemoteEvent errado.
         _oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
             local method = getnamecallmethod()
             if _hookEnabled and not checkcaller() and (method == "FireServer" or method == "fireServer") then
-                local args = {...}
-                local isPayload = false
-                local a1 = args[1]
-                local t = typeof(a1)
-                if t == "buffer" then
-                    isPayload = true
-                elseif t == "string" then
-                    local ok2 = pcall(string.find, a1, "\1", 1, true)
-                    if ok2 then
-                        isPayload = true
+                if typeof(self) == "Instance" and self:IsA("RemoteEvent") then
+                    local args = {...}
+                    if looksLikeParryPayload(args[1]) then
+                        cacheRemote(self, "buffer", true)
                     end
-                end
-                if isPayload or (typeof(self) == "Instance" and self:IsA("RemoteEvent") and self.Name == "RemoteEvent") then
-                    cacheRemote(self, "buffer")
                 end
             end
             return _oldNamecall(self, ...)
         end)
 
+        -- Hook secundário: __index. Usado pelo invisible pra detectar o
+        -- remote na hora do fetch. Mantemos o fallback, mas só cacheia
+        -- se o remote realmente parecer o de parry (nome RemoteEvent
+        -- com parent que contém "Remote" no path).
         _oldIndex = hookmetamethod(game, "__index", function(self, key)
             if _hookEnabled and not checkcaller() and (key == "FireServer" or key == "fireServer") and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
                 if self.Name == "RemoteEvent" or (self.Parent and type(self.Parent.Name) == "string" and string.find(self.Parent.Name, "Remote")) then
                     task.spawn(function()
-                        cacheRemote(self, "buffer")
+                        -- Index hook não confirma payload — fica untrusted.
+                        cacheRemote(self, "buffer", false)
                     end)
                 end
             end
@@ -214,6 +236,8 @@ local function installHook()
     end)
     if ok then
         _hooked = true
+    else
+        warn("[probe] installHook falhou: " .. tostring(err))
     end
     return _hooked
 end
@@ -229,6 +253,7 @@ local function resolveFromConfig()
         if inst then
             parryR, parryMode = inst, cfg.mode or "buffer"
             parryInit = false
+            _remoteTrusted = false -- config salvo, sem confirmação de payload
             _savedRemote = cfg
             _resolvedOnce = true
             return parryR, parryMode
@@ -252,13 +277,13 @@ local function resolveRemote()
     if Remotes then
         local rem = Remotes:FindFirstChild("pr_" .. tostring(Players.LocalPlayer.UserId))
         if validRemote(rem) then
-            return cacheRemote(rem, "buffer")
+            return cacheRemote(rem, "buffer", false)
         end
     end
     if GenRemotes then
         local rem = GenRemotes:FindFirstChild("RE_1")
         if validRemote(rem) then
-            return cacheRemote(rem, "event")
+            return cacheRemote(rem, "event", false)
         end
     end
     installHook()
@@ -278,7 +303,7 @@ local function probeNamedRemoteEvents()
                 if type(n) == "string" then
                     local r = folder:FindFirstChild(n)
                     if validRemote(r) then
-                        return cacheRemote(r, (r.Name == "RE_1") and "event" or "buffer")
+                        return cacheRemote(r, (r.Name == "RE_1") and "event" or "buffer", false)
                     end
                 end
             end
@@ -328,10 +353,14 @@ function Probe.initParry()
 end
 
 function Probe.fireParry(flag)
-    -- Tenta até 2 vezes. Se o FireServer falhar (remote errado, args errados,
-    -- ou qualquer pcall erro), invalida e re-resolve o remote antes de tentar
-    -- de novo. Isso elimina o erro "argument #1 expects a string, but CFrame
-    -- was passed" causado por cache de remote incorreto.
+    -- Estratégia (alinhada com o invisible hub):
+    -- 1) Resolve o remote cacheado.
+    -- 2) Se for "event", dispara sem payload.
+    -- 3) Se for "buffer", manda o payload de parry. Se o remote não for
+    --    trusted (veio de config/pool nomeado/__index sem payload), faz
+    --    um "probe silencioso" com pcall antes pra detectar remote errado
+    --    (ex.: CFrame was passed). Se falhar, invalida e re-resolve.
+    -- 4) Em qualquer falha, re-tenta UMA vez depois de invalidar.
     local function attempt()
         local r, m = resolveRemote()
         if not validRemote(r) then
@@ -353,6 +382,24 @@ function Probe.fireParry(flag)
         if not p then
             return false
         end
+
+        if not _remoteTrusted then
+            local probeOk, probeErr = pcall(r.FireServer, r, p)
+            if not probeOk then
+                warn(("[phantom_logic] remote não aceitou payload, re-resolvendo: %s"):format(tostring(probeErr)))
+                parryR, parryMode, parryInit, _remoteTrusted = nil, nil, false, false
+                r, m = resolveRemote()
+                if not validRemote(r) then
+                    return false
+                end
+            else
+                -- Passou no probe — agora o remote é trusted.
+                _remoteTrusted = true
+                parryInit = true
+                return true
+            end
+        end
+
         local initOk, initialized = pcall(Probe.initParry)
         if not initOk or not initialized then
             return false
@@ -360,6 +407,8 @@ function Probe.fireParry(flag)
         local ok, err = pcall(r.FireServer, r, p)
         if not ok then
             warn(("[phantom_logic] fireParry.fire fail: %s"):format(tostring(err)))
+        else
+            _remoteTrusted = true
         end
         return ok
     end
@@ -378,11 +427,13 @@ end
 
 function Probe.invalidateRemote()
     parryR, parryMode, parryInit = nil, nil, false
+    _remoteTrusted = false
 end
 
 -- alias usado pelo init pra revalidar
 function Probe.invalidate()
     parryR, parryMode, parryInit = nil, nil, false
+    _remoteTrusted = false
 end
 
 -- alias usado pelo init pra varrer pools nomeados (did/RE_Deflect/Deflect)
