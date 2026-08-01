@@ -10,7 +10,7 @@ local P = {
     MIN_SPD = 3,
     DEFLECT_R = 8.5,
     RAD_FLOOR = 14,
-    LEAD_CAP = 50,
+    LEAD_CAP = 80,
     PRE_CAP = 30,
     PB_WEIGHT = 1.0,
     CPF_MIN_SPACING_MS = 0.05,
@@ -18,7 +18,7 @@ local P = {
     CPF_FPS_SAMPLE_T = 0.5,
     CPF_PING_FLOOR = 0.040,
     CPF_PING_REF = 0.060,
-    LEAD_PING_FLOOR = 0.040,
+    LEAD_PING_FLOOR = 0.060,
     LEAD_RTT_MULT = 0.5,
     LEAD_TICK_FRAMES = 2,
     RES_BASE = 0,
@@ -65,7 +65,8 @@ local Sync = {
     Teleported = false,
     Target = -999,
     lastSyncAt = 0,
-    forcedAt = 0
+    forcedAt = 0,
+    hasRealPos = false,
 }
 
 -- locals
@@ -207,6 +208,7 @@ local function resetState()
     Sync.Target = -999
     Sync.lastSyncAt = 0
     Sync.forcedAt = 0
+    Sync.hasRealPos = false
     _teleportLockUntil = 0
 end
 
@@ -221,6 +223,7 @@ local function onBallSync(d)
     end
     if typeof(d.RealPosition) == "Vector3" then
         Sync.RealPos = d.RealPosition
+        Sync.hasRealPos = true
     end
     if typeof(d.DeflectDirection) == "Vector3" then
         Sync.DeflectDir = d.DeflectDirection
@@ -331,7 +334,6 @@ local function bindParry(ch)
                     return
                 end
                 local syncFresh = (t - Sync.lastSyncAt) < 0.5
-                local bp = (syncFresh and Sync.RealPos ~= Vector3.new(0, 0, 0)) and Sync.RealPos or ball.Position
                 local spd
                 if syncFresh and Sync.Speed > 0 then
                     spd = Sync.Speed
@@ -341,6 +343,32 @@ local function bindParry(ch)
                 end
                 if spd < P.MIN_SPD then
                     return
+                end
+                local bp
+                if syncFresh and Sync.hasRealPos then
+                    local pingSec = GameInfo.pingOneWay()
+                    if spd > 1 and pingSec > 0 then
+                        local dir = Sync.DeflectDir
+                        if dir and dir.Magnitude > 0.01 then
+                            dir = dir.Unit
+                        else
+                            local ok2, av = pcall(function() return ball.AssemblyLinearVelocity end)
+                            if ok2 and typeof(av) == "Vector3" and av.Magnitude > 0.1 then
+                                dir = av.Unit
+                            else
+                                dir = nil
+                            end
+                        end
+                        if dir then
+                            bp = Sync.RealPos + dir * (spd * pingSec)
+                        else
+                            bp = Sync.RealPos
+                        end
+                    else
+                        bp = Sync.RealPos
+                    end
+                else
+                    bp = ball.Position
                 end
                 local tickMs = (GameInfo.frameEMA() > 0 and GameInfo.frameEMA() * 1000) or 16.67
                 local leadSec = math.max(
