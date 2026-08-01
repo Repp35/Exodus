@@ -1,4 +1,4 @@
---[[ autoparry.luau ]]
+--[[ auto parry ]]
 
 -- módulo
 local AutoParry = {}
@@ -38,7 +38,7 @@ local P = {
     GRACE_TIMEOUT = 0.30,
 }
 
--- estado AP
+-- estado ap
 local AP = {
     armed = false,
     fired = false,
@@ -50,7 +50,7 @@ local AP = {
     lastMissAt = 0,
 }
 
--- estado RES
+-- estado res
 local RES = {
     stack = 0,
     lastFireBallRef = nil,
@@ -59,7 +59,7 @@ local RES = {
     lastStackAt = 0
 }
 
--- estado Sync
+-- estado sync
 local Sync = {
     Speed = 0,
     RealPos = Vector3.new(0, 0, 0),
@@ -155,16 +155,13 @@ local function isTargetedByBall(character)
     local PlayersService = Utils.getPlayers()
     local WorkspaceService = game:GetService("Workspace")
 
-    -- 1) Atributo do Workspace
     if WorkspaceService:GetAttribute("GameBallTarget") == _localUserId then
         return true
     end
-    -- 2) BallReplicator.syncData
     local br = _ensureBR()
     if br and br.syncData and br.syncData.HighlightTargetPlayerID == _localUserId then
         return true
     end
-    -- 3) Sync.Target
     if Sync and Sync.Target == _localUserId then
         return true
     end
@@ -228,7 +225,6 @@ local function onBallSync(data)
     if data.Teleported == true then
         _teleportLockUntil = t + 0.20
         AP.fired = false
-        -- _G.PhantomOnTeleport
         Sync.Teleported = true
         return
     end
@@ -261,7 +257,6 @@ local function onBallSync(data)
     elseif data.Grace == true then
         Sync.Grace = true
     end
-    -- _G.PhantomOnTarget
 end
 
 -- bind de parry
@@ -277,7 +272,7 @@ local function bindParry(character)
     end
     AP.fired, AP.armed = false, false
 
-    -- heartbeat
+-- heartbeat
     Utils.trackCharacter(
         Utils.getRunService().Heartbeat:Connect(
             function(dt)
@@ -392,7 +387,7 @@ local function bindParry(character)
             end
         )
     )
-    -- ancestry
+-- ancestry
     Utils.trackCharacter(
         character.AncestryChanged:Connect(
             function(_, parent)
@@ -459,6 +454,10 @@ end
 
 function AutoParry.getP()
     return P
+end
+
+if _G.ExodusModules then
+    _G.ExodusModules.AutoParry = AutoParry
 end
 
 return AutoParry
