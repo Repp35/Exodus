@@ -1,10 +1,18 @@
---[[ phantom_ui.luau ]]
+--[[ phantom ui ]]
 
 -- módulo
 local PhantomUI = {}
 
--- dependências (serão injetadas)
-local Utils
+-- dependências
+local Exodus = _G.ExodusModules or {}
+local Utils = Exodus.Utils
+
+if not Utils then
+    repeat task.wait(0.1) 
+        Exodus = _G.ExodusModules or {}
+        Utils = Exodus.Utils
+    until Utils or not task.wait(5)
+end
 
 -- serviços
 local UIS = game:GetService("UserInputService")
@@ -20,7 +28,7 @@ local _spawn = task.spawn
 local SCRIPT_VERSION = "22.1"
 local SCRIPT_NAME = "PhantomBallGUI"
 
--- estado interno da UI
+-- estado interno da ui
 local UIState = {
     connections = {},
     panelOpen = false,
@@ -215,7 +223,6 @@ local function makeDraggable(handle, target, onDragEnd)
     end
 end
 
--- gradiente animado compartilhado
 local flowingGradients = {}
 local function registerFlow(obj)
     flowingGradients[#flowingGradients + 1] = attachFlow(obj)
@@ -433,7 +440,6 @@ local colRight
 -- kill button
 local killBtn
 
--- componentes reutilizáveis
 local function cardFrame(yPos, h, parent)
     local f =
         inst(
@@ -808,7 +814,6 @@ local function createSpamCard(yPos, parent)
     return yPos + 118 + CARD_GAP
 end
 
--- abrir / fechar painel
 local function togglePanel()
     UIState.panelOpen = not UIState.panelOpen
     safeCancel(UIState.panelTween)
@@ -862,17 +867,17 @@ local function togglePanel()
     end
 end
 
--- inicialização da UI
+-- inicialização da ui
 function PhantomUI.init(deps)
     Utils = deps.Utils
 
-    -- verificar e destruir GUI antiga
+-- verificar e destruir gui
     local old = CoreGui:FindFirstChild("PhantomUISystem")
     if old then
         old:Destroy()
     end
 
-    -- screen gui
+-- screen gui
     screenGui =
         inst(
         "ScreenGui",
@@ -886,7 +891,7 @@ function PhantomUI.init(deps)
     )
     startFlowingLoop(screenGui)
 
-    -- floating button
+-- floating button
     floatingButton =
         inst(
         "TextButton",
@@ -907,7 +912,7 @@ function PhantomUI.init(deps)
     corner(floatingButton, 999)
     registerFlow(stroke(floatingButton, C.accent, 2))
 
-    -- clash ball
+-- clash ball
     local config = Utils.getConfig()
     local clashX = config.ClashBallX or 14
     local clashY = config.ClashBallY or (viewport().Y / 2 - CLASH_SIZE / 2)
@@ -976,7 +981,7 @@ function PhantomUI.init(deps)
         end
     ))
 
-    -- mini gui spam
+-- mini gui spam
     local miniX = config.MiniX or (viewport().X - MINI_W - 14)
     local miniY = config.MiniY or (viewport().Y / 2 - MINI_H / 2)
     local MINI_OFF_X = viewport().X + 30
@@ -1105,7 +1110,7 @@ function PhantomUI.init(deps)
         end
     )
 
-    -- painel principal
+-- painel principal
     configPanel =
         inst(
         "Frame",
@@ -1124,7 +1129,7 @@ function PhantomUI.init(deps)
     corner(configPanel, 16)
     stroke(configPanel, C.accent, 1.5)
 
-    -- partículas de fundo
+-- partículas de fundo
     particleLayer =
         inst(
         "Frame",
@@ -1149,7 +1154,7 @@ function PhantomUI.init(deps)
         end
     )
 
-    -- title bar
+-- title bar
     titleBar =
         inst(
         "Frame",
@@ -1223,7 +1228,7 @@ function PhantomUI.init(deps)
         end
     ))
 
-    -- colunas
+-- colunas
     colLeft =
         inst(
         "Frame",
@@ -1247,7 +1252,7 @@ function PhantomUI.init(deps)
         }
     )
 
-    -- kill button
+-- kill button
     killBtn =
         inst(
         "TextButton",
@@ -1279,7 +1284,7 @@ function PhantomUI.init(deps)
         ))
     end
 
-    -- auto clash: cria toggle proprio e expoe track/thumb
+-- auto clash
     local yL = 4
     local _track, _thumb
     local function buildAutoClash(y)
@@ -1353,7 +1358,6 @@ function PhantomUI.init(deps)
     yR = createKeybindSelector(yR, colRight)
     yR = createSpamCard(yR, colRight)
 
-    -- drag do painel / botao
     makeDraggable(
         titleBar,
         configPanel,
@@ -1373,7 +1377,7 @@ function PhantomUI.init(deps)
         end
     ))
 
-    -- keybinds globais
+-- keybinds globais
     trackConn(
         UIS.InputBegan:Connect(
             function(input, gpe)
@@ -1410,7 +1414,7 @@ function PhantomUI.init(deps)
         )
     )
 
-    -- kill button
+-- kill button
     trackConn(killBtn.Activated:Connect(
         function()
             Utils.stop()
@@ -1437,7 +1441,6 @@ function PhantomUI.init(deps)
         end
     ))
 
-    -- estado inicial do clash ball
     if config.ClashBallVisible then
         clashBall.Position = UDim2.new(0, clashX, 0, clashY)
     end
@@ -1450,8 +1453,11 @@ function PhantomUI.init(deps)
         )
     )
 
-    -- Sincronizar estado inicial do spam manual
     setSpam(Utils.isManualSpamActive())
+end
+
+if _G.ExodusModules then
+    _G.ExodusModules.GUI = PhantomUI
 end
 
 return PhantomUI
