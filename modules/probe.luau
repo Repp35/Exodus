@@ -14,6 +14,19 @@ local _buf1, _buf2 = nil, nil
 local _warnLast, _warnGap = 0, 5
 local _now = os.clock
 
+-- hook state
+local _hooked = false
+local _oldNamecall, _oldIndex = nil, nil
+local _hookEnabled = true
+
+local DEFAULT_REMOTE_PATH = nil -- ex: "ReplicatedStorage.Remotes.pr_123456789"
+local DEFAULT_MODE = "buffer"   -- "buffer" ou "event"
+
+-- config persistida (opcional, sobrescreve se existir)
+local CONFIG_PATH = "probe_config.json"
+local _savedRemote = nil
+local _resolvedOnce = false
+
 -- safeReq
 local function safeReq(m)
     if not (m and m:IsA("ModuleScript")) then
@@ -59,87 +72,245 @@ local function _initBufs()
 end
 _initBufs()
 
--- makeBuf
 local function makeBuf(flag)
     return flag == 2 and _buf2 or _buf1
 end
 
--- validRemote
 local function validRemote(r)
     return typeof(r) == "Instance" and r.Parent ~= nil and r:IsA("RemoteEvent")
 end
 
--- getGlobal
-local function getGlobal()
-    if type(getfenv) ~= "function" or type(Deflect) ~= "table" then
-        return _G
+local function phantomWarn(tag, msg)
+    local t = _now()
+    if (t - _warnLast) < _warnGap then
+        return
     end
-    local candidates = {"Deflect", "OnClientCreate", "constructor"}
-    for _, name in ipairs(candidates) do
-        local fn = Deflect[name]
-        if type(fn) == "function" then
-            local ok, env = pcall(getfenv, fn)
-            if ok and type(env) == "table" then
-                local g = rawget(env, "_G")
-                return (type(g) == "table" and g or env)
-            end
+    _warnLast = t
+    warn(("[phantom_logic] %s: %s"):format(tag, tostring(msg)))
+end
+
+-- ============================================================
+-- PERSISTÊNCIA: salva qual remote + como usar
+-- ============================================================
+local function getFullPath(inst)
+    if not (typeof(inst) == "Instance" and inst.Parent) then
+        return inst and inst.Name or "?"
+    end
+    local parts = { inst.Name }
+    local cur = inst.Parent
+    while cur and cur ~= game do
+        table.insert(parts, 1, cur.Name)
+        cur = cur.Parent
+    end
+    return table.concat(parts, ".")
+end
+
+local function findInstanceByPath(path)
+    if type(path) ~= "string" or path == "" then
+        return nil
+    end
+    local cur = game
+    for seg in string.gmatch(path, "[^.]+") do
+        if not cur then
+            return nil
         end
+        cur = cur:FindFirstChild(seg)
     end
-    return _G
+    if validRemote(cur) then
+        return cur
+    end
+    return nil
 end
 
--- setGlobal
-local function setGlobal(k, v)
-    local g = getGlobal()
-    if type(g) == "table" then
-        rawset(g, k, v)
+local function saveConfig()
+    if not (parryR and validRemote(parryR)) then
+        return false
     end
+    local ok, http = pcall(function()
+        local s = game:GetService("HttpService")
+        return s and s.JSONEncode and s.JSONDecode
+    end)
+    if not ok or not http then
+        return false
+    end
+    local cfg = {
+        name = parryR.Name,
+        path = getFullPath(parryR),
+        class = parryR.ClassName,
+        mode = parryMode or "buffer",
+        buffer = (parryMode == "buffer") and "\\1" or nil,
+        captured_at = os.time(),
+        usage = string.format('%s:FireServer(buffer.fromstring("\\1"))', getFullPath(parryR)),
+    }
+    local ok2, json = pcall(http.JSONEncode, http, cfg)
+    if not ok2 then
+        return false
+    end
+    pcall(function()
+        writefile(CONFIG_PATH, json)
+    end)
+    pcall(function()
+        print(("[probe] remote salvo em %s -> %s"):format(CONFIG_PATH, getFullPath(parryR)))
+    end)
+    return true
 end
 
--- cacheRemote
+local function loadConfig()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then
+        return nil
+    end
+    if not isfile(CONFIG_PATH) then
+        return nil
+    end
+    local ok, content = pcall(readfile, CONFIG_PATH)
+    if not ok or type(content) ~= "string" then
+        return nil
+    end
+    local ok2, http = pcall(function()
+        return game:GetService("HttpService")
+    end)
+    if not ok2 then
+        return nil
+    end
+    local ok3, data = pcall(http.JSONDecode, http, content)
+    if not ok3 or type(data) ~= "table" then
+        return nil
+    end
+    return data
+end
+
+-- ============================================================
+-- CACHE do remote (passo do hook)
+-- ============================================================
 local function cacheRemote(r, mode)
     if not validRemote(r) then
         return nil
     end
-    if r.Name == "RE_1" then
-        mode = "event"
-    end
+    local changed = (parryR ~= r) or (parryMode ~= mode)
     parryR, parryMode = r, mode
-    if mode == "buffer" then
-        setGlobal("did", r)
+    parryInit = false
+    if changed then
+        saveConfig()
     end
     return r, mode
 end
 
--- resolveRemote
+-- hook install (mesmo esquema do invisible)
+local function installHook()
+    if _hooked then
+        return true
+    end
+    if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" or type(checkcaller) ~= "function" then
+        return false
+    end
+    local ok, err = pcall(function()
+        _oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            if _hookEnabled and not checkcaller() and (method == "FireServer" or method == "fireServer") then
+                local args = { ... }
+                local isPayload = false
+                local a1 = args[1]
+                if a1 then
+                    local t = typeof(a1)
+                    if t == "buffer" then
+                        isPayload = true
+                    elseif t == "string" and string.find(a1, "\1") then
+                        isPayload = true
+                    end
+                end
+                if isPayload or (typeof(self) == "Instance" and self:IsA("RemoteEvent") and self.Name == "RemoteEvent") then
+                    cacheRemote(self, "buffer")
+                end
+            end
+            return _oldNamecall(self, ...)
+        end)
+
+        _oldIndex = hookmetamethod(game, "__index", function(self, key)
+            if _hookEnabled and not checkcaller() and (key == "FireServer" or key == "fireServer")
+                and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
+                if self.Name == "RemoteEvent" or (self.Parent and string.find(self.Parent.Name, "Remote")) then
+                    task.spawn(function() cacheRemote(self, "buffer") end)
+                end
+            end
+            return _oldIndex(self, key)
+        end)
+    end)
+    if ok then
+        _hooked = true
+    else
+        phantomWarn("hook.install", err)
+    end
+    return _hooked
+end
+
+-- resolve: JSON (persiste) > hardcode (fallback máximo) > hook
+local function resolveFromConfig()
+    if _resolvedOnce and validRemote(parryR) then
+        return parryR, parryMode
+    end
+
+    -- 1) JSON persiste entre sessões (vem primeiro — se já parryou antes, usa isso)
+    local cfg = loadConfig()
+    if cfg and cfg.path then
+        local inst = findInstanceByPath(cfg.path)
+        if inst then
+            parryR, parryMode = inst, cfg.mode or "buffer"
+            parryInit = false
+            _savedRemote = cfg
+            _resolvedOnce = true
+            return parryR, parryMode
+        end
+    end
+
+    -- 2) hardcode (só pra primeira vez, antes de qualquer parry e antes de ter JSON)
+    if type(DEFAULT_REMOTE_PATH) == "string" and DEFAULT_REMOTE_PATH ~= "" then
+        local inst = findInstanceByPath(DEFAULT_REMOTE_PATH)
+        if inst then
+            parryR, parryMode = inst, DEFAULT_MODE or "buffer"
+            parryInit = false
+            _resolvedOnce = true
+            return parryR, parryMode
+        end
+    end
+
+    return nil
+end
+
 local function resolveRemote()
     refreshRefs()
+
     if parryR and (not parryR.Parent or not parryR:IsA("RemoteEvent")) then
         parryR, parryMode, parryInit = nil, nil, false
     end
     if validRemote(parryR) then
         return parryR, parryMode
     end
-    local did = rawget(getGlobal(), "did")
-    if validRemote(did) then
-        return cacheRemote(did, "buffer")
+
+    -- 1) config persistida (fallback máximo)
+    local r, m = resolveFromConfig()
+    if r then
+        return r, m
     end
+
+    -- 2) fallback por nome
     if Remotes then
-        local r = Remotes:FindFirstChild("pr_" .. tostring(Players.LocalPlayer.UserId))
-        if validRemote(r) then
-            return cacheRemote(r, "buffer")
+        local rem = Remotes:FindFirstChild("pr_" .. tostring(Players.LocalPlayer.UserId))
+        if validRemote(rem) then
+            return cacheRemote(rem, "buffer")
         end
     end
     if GenRemotes then
-        local r = GenRemotes:FindFirstChild("RE_1")
-        if validRemote(r) then
-            return cacheRemote(r, "event")
+        local rem = GenRemotes:FindFirstChild("RE_1")
+        if validRemote(rem) then
+            return cacheRemote(rem, "event")
         end
     end
+
+    -- 3) ativa hook pra pegar quando o usuário (ou outro) der parry
+    installHook()
     return nil
 end
 
--- probeNamedRemoteEvents
 local function probeNamedRemoteEvents()
     local pools = {
         {Remotes, {"did", "RE_Deflect", "Deflect"}},
@@ -162,7 +333,6 @@ local function probeNamedRemoteEvents()
     return nil
 end
 
--- initParry
 local function initParry()
     if parryInit then
         return true
@@ -186,17 +356,6 @@ local function initParry()
     return parryInit
 end
 
--- phantomWarn
-local function phantomWarn(tag, msg)
-    local t = _now()
-    if (t - _warnLast) < _warnGap then
-        return
-    end
-    _warnLast = t
-    warn(("[phantom_logic] %s: %s"):format(tag, tostring(msg)))
-end
-
--- fireParry
 local function fireParry(r, m, flag)
     if not validRemote(r) then
         return false
@@ -208,7 +367,12 @@ local function fireParry(r, m, flag)
         end
         return ok
     end
-    local p = makeBuf(flag or 1)
+    local p
+    if type(buffer) == "table" and type(buffer.fromstring) == "function" then
+        p = buffer.fromstring(flag == 2 and "\2" or "\1")
+    else
+        p = makeBuf(flag or 1)
+    end
     if not p then
         return false
     end
@@ -224,10 +388,8 @@ local function fireParry(r, m, flag)
     return ok
 end
 
--- ball sync state
+-- ball sync
 local _ballSync, _ballSyncConn = nil, nil
-
--- connectBallSync
 local function connectBallSync(track)
     refreshRefs()
     local candidate = Remotes and Remotes:FindFirstChild("BallSyncData")
@@ -244,7 +406,6 @@ local function connectBallSync(track)
     return true
 end
 
--- bindBallSync
 local function bindBallSync(handler, track)
     if not connectBallSync(track) then
         return false
@@ -256,7 +417,6 @@ local function bindBallSync(handler, track)
     return true
 end
 
--- tryConnectResilience
 local function tryConnectResilience(track)
     track(
         workspace.DescendantAdded:Connect(
@@ -302,10 +462,10 @@ local function tryConnectResilience(track)
     )
 end
 
--- revalidate
 local function revalidate()
     if not (parryR and parryR:IsA("RemoteEvent") and parryR.Parent) then
         parryR, parryMode, parryInit = nil, nil, false
+        _resolvedOnce = false
         local remote = resolveRemote()
         if not remote then
             remote = probeNamedRemoteEvents()
@@ -316,6 +476,10 @@ local function revalidate()
     end
     refreshRefs()
 end
+
+-- já instala hook e tenta config logo no require
+installHook()
+resolveFromConfig()
 
 -- public api
 function Probe.refreshRefs()
@@ -339,6 +503,7 @@ end
 
 function Probe.invalidate()
     parryR, parryMode, parryInit = nil, nil, false
+    _resolvedOnce = false
 end
 
 function Probe.bindBallSync(handler, track)
@@ -361,6 +526,19 @@ function Probe.resolveIfStale(lastResolveAt, maxAge)
     end
     local r, m = resolveRemote()
     return r, m
+end
+
+function Probe.setHookEnabled(v)
+    _hookEnabled = (v ~= false)
+end
+function Probe.isHookInstalled()
+    return _hooked
+end
+function Probe.getSavedConfig()
+    return _savedRemote
+end
+function Probe.getConfigPath()
+    return CONFIG_PATH
 end
 
 return Probe
