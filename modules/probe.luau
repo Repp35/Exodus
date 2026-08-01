@@ -7,19 +7,31 @@ local Probe = {}
 local Utils
 
 -- serviços
-local Players
-local ReplicatedStorage
+local Replicated = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
 
 -- estado
-local TSFolder, RemotesFolder, GeneratedRemotesFolder = nil, nil, nil
-local parryRemote, parryMode, parryInitialized = nil, nil, false
+local TSFolder, Remotes, GenRemotes, abilFolder = nil, nil, nil, nil
+local Deflect = nil
+local parryR, parryMode, parryInit = nil, nil, false
 local _buf1, _buf2 = nil, nil
+local _warnLast, _warnGap = 0, 5
+local _now = os.clock
+
 local _hooked = false
 local _oldNamecall, _oldIndex = nil, nil
 local _hookEnabled = true
 
+local DEFAULT_REMOTE_PATH = nil
+local DEFAULT_MODE = "buffer"
+
+local CONFIG_FOLDER = "PhantomLogic"
+local CONFIG_PATH = CONFIG_FOLDER .. "/probe_config.json"
+local _savedRemote = nil
+local _resolvedOnce = false
+
 -- buffers
-local function initBuffers()
+local function _initBufs()
     if type(buffer) ~= "table" then
         return
     end
@@ -34,274 +46,332 @@ local function initBuffers()
     end
 end
 
-local function getBuffer(flag)
+local function makeBuf(flag)
     return flag == 2 and _buf2 or _buf1
 end
 
 -- validação
-local function isValidRemote(remote)
-    return typeof(remote) == "Instance" and remote.Parent ~= nil and remote:IsA("RemoteEvent")
+local function validRemote(r)
+    return typeof(r) == "Instance" and r.Parent ~= nil and r:IsA("RemoteEvent")
 end
 
--- referências de serviço
-local function refreshServiceRefs()
-    TSFolder = ReplicatedStorage:FindFirstChild("TS")
-    RemotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
-    GeneratedRemotesFolder = TSFolder and TSFolder:FindFirstChild("GeneratedNetworkRemotes")
+-- referências
+local function refreshRefs()
+    if not (TSFolder and TSFolder.Parent) then
+        TSFolder = Replicated:FindFirstChild("TS")
+        GenRemotes = TSFolder and TSFolder:FindFirstChild("GeneratedNetworkRemotes")
+        abilFolder = TSFolder and TSFolder:FindFirstChild("Abilities")
+    end
+    if not (Remotes and Remotes.Parent) then
+        Remotes = Replicated:FindFirstChild("Remotes")
+    end
 end
 
--- hook de metamétodo
-local function installMetamethodHook()
+-- path helpers
+local function getFullPath(inst)
+    if not (typeof(inst) == "Instance" and inst.Parent) then
+        return inst and inst.Name or "?"
+    end
+    local parts = {inst.Name}
+    local cur = inst.Parent
+    while cur and cur ~= game do
+        table.insert(parts, 1, cur.Name)
+        cur = cur.Parent
+    end
+    return table.concat(parts, ".")
+end
+
+local function findInstanceByPath(path)
+    if type(path) ~= "string" or path == "" then
+        return nil
+    end
+    local cur = game
+    for seg in string.gmatch(path, "[^.]+") do
+        if not cur then
+            return nil
+        end
+        cur = cur:FindFirstChild(seg)
+    end
+    if validRemote(cur) then
+        return cur
+    end
+    return nil
+end
+
+-- config persist
+local function saveConfig()
+    if not (parryR and validRemote(parryR)) then
+        return false
+    end
+    local ok, http = pcall(function()
+        return game:GetService("HttpService")
+    end)
+    if not ok or not http then
+        return false
+    end
+    local cfg = {
+        name = parryR.Name,
+        path = getFullPath(parryR),
+        class = parryR.ClassName,
+        mode = parryMode or "buffer",
+        captured_at = os.time()
+    }
+    local ok2, json = pcall(http.JSONEncode, http, cfg)
+    if not ok2 then
+        return false
+    end
+    pcall(function()
+        if type(makefolder) == "function" and type(isfolder) == "function" then
+            if not isfolder(CONFIG_FOLDER) then
+                makefolder(CONFIG_FOLDER)
+            end
+        end
+        if type(writefile) == "function" then
+            writefile(CONFIG_PATH, json)
+        end
+    end)
+    return true
+end
+
+local function loadConfig()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then
+        return nil
+    end
+    if not isfile(CONFIG_PATH) then
+        return nil
+    end
+    local ok, content = pcall(readfile, CONFIG_PATH)
+    if not ok or type(content) ~= "string" then
+        return nil
+    end
+    local ok2, http = pcall(function()
+        return game:GetService("HttpService")
+    end)
+    if not ok2 then
+        return nil
+    end
+    local ok3, data = pcall(http.JSONDecode, http, content)
+    if not ok3 or type(data) ~= "table" then
+        return nil
+    end
+    return data
+end
+
+-- cache / hook
+local function cacheRemote(r, mode)
+    if not validRemote(r) then
+        return nil
+    end
+    local changed = (parryR ~= r) or (parryMode ~= mode)
+    parryR, parryMode = r, mode
+    parryInit = false
+    if changed then
+        saveConfig()
+    end
+    return r, mode
+end
+
+local function installHook()
     if _hooked then
         return true
     end
     if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" or type(checkcaller) ~= "function" then
         return false
     end
-    local ok, err =
-        pcall(
-        function()
-            _oldNamecall =
-                hookmetamethod(
-                game,
-                "__namecall",
-                function(self, ...)
-                    local method = getnamecallmethod()
-                    if _hookEnabled and not checkcaller() and (method == "FireServer" or method == "fireServer") then
-                        local args = {...}
-                        local a1 = args[1]
-                        local t = typeof(a1)
-                        local isPayload = (t == "buffer") or (t == "string" and pcall(string.find, a1, "\1", 1, true))
-                        if
-                            isPayload or
-                                (typeof(self) == "Instance" and self:IsA("RemoteEvent") and self.Name == "RemoteEvent")
-                         then
-                            parryRemote, parryMode = self, "buffer"
-                            parryInitialized = false
-                        end
+    local ok, err = pcall(function()
+        _oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            if _hookEnabled and not checkcaller() and (method == "FireServer" or method == "fireServer") then
+                local args = {...}
+                local isPayload = false
+                local a1 = args[1]
+                local t = typeof(a1)
+                if t == "buffer" then
+                    isPayload = true
+                elseif t == "string" then
+                    local ok2 = pcall(string.find, a1, "\1", 1, true)
+                    if ok2 then
+                        isPayload = true
                     end
-                    return _oldNamecall(self, ...)
                 end
-            )
+                if isPayload or (typeof(self) == "Instance" and self:IsA("RemoteEvent") and self.Name == "RemoteEvent") then
+                    cacheRemote(self, "buffer")
+                end
+            end
+            return _oldNamecall(self, ...)
+        end)
 
-            _oldIndex =
-                hookmetamethod(
-                game,
-                "__index",
-                function(self, key)
-                    if
-                        _hookEnabled and not checkcaller() and (key == "FireServer" or key == "fireServer") and
-                            typeof(self) == "Instance" and
-                            self:IsA("RemoteEvent")
-                     then
-                        if
-                            self.Name == "RemoteEvent" or
-                                (self.Parent and type(self.Parent.Name) == "string" and
-                                    string.find(self.Parent.Name, "Remote"))
-                         then
-                            task.spawn(
-                                function()
-                                    parryRemote, parryMode = self, "buffer"
-                                    parryInitialized = false
-                                end
-                            )
-                        end
-                    end
-                    return _oldIndex(self, key)
+        _oldIndex = hookmetamethod(game, "__index", function(self, key)
+            if _hookEnabled and not checkcaller() and (key == "FireServer" or key == "fireServer") and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
+                if self.Name == "RemoteEvent" or (self.Parent and type(self.Parent.Name) == "string" and string.find(self.Parent.Name, "Remote")) then
+                    task.spawn(function()
+                        cacheRemote(self, "buffer")
+                    end)
                 end
-            )
-        end
-    )
+            end
+            return _oldIndex(self, key)
+        end)
+    end)
     if ok then
         _hooked = true
-    else
-        warn(string.format("[Probe] Falha ao instalar hook: %s", tostring(err)))
     end
     return _hooked
 end
 
--- resolução de remote
-local function resolveParryRemote()
-    refreshServiceRefs()
-
-    if parryRemote and (not parryRemote.Parent or not parryRemote:IsA("RemoteEvent")) then
-        parryRemote, parryMode, parryInitialized = nil, nil, false
+-- resolve
+local function resolveFromConfig()
+    if _resolvedOnce and validRemote(parryR) then
+        return parryR, parryMode
     end
-    if isValidRemote(parryRemote) then
-        return parryRemote, parryMode
-    end
-
-    -- tenta remotes conhecidos
-    if RemotesFolder then
-        local rem = RemotesFolder:FindFirstChild("pr_" .. tostring(Players.LocalPlayer.UserId))
-        if isValidRemote(rem) then
-            parryRemote, parryMode = rem, "buffer"
-            parryInitialized = false
-            return parryRemote, parryMode
+    local cfg = loadConfig()
+    if cfg and cfg.path then
+        local inst = findInstanceByPath(cfg.path)
+        if inst then
+            parryR, parryMode = inst, cfg.mode or "buffer"
+            parryInit = false
+            _savedRemote = cfg
+            _resolvedOnce = true
+            return parryR, parryMode
         end
     end
-    if GeneratedRemotesFolder then
-        local rem = GeneratedRemotesFolder:FindFirstChild("RE_1")
-        if isValidRemote(rem) then
-            parryRemote, parryMode = rem, "event"
-            parryInitialized = false
-            return parryRemote, parryMode
+    return nil
+end
+
+local function resolveRemote()
+    refreshRefs()
+    if parryR and (not parryR.Parent or not parryR:IsA("RemoteEvent")) then
+        parryR, parryMode, parryInit = nil, nil, false
+    end
+    if validRemote(parryR) then
+        return parryR, parryMode
+    end
+    local r, m = resolveFromConfig()
+    if r then
+        return r, m
+    end
+    if Remotes then
+        local rem = Remotes:FindFirstChild("pr_" .. tostring(Players.LocalPlayer.UserId))
+        if validRemote(rem) then
+            return cacheRemote(rem, "buffer")
         end
     end
+    if GenRemotes then
+        local rem = GenRemotes:FindFirstChild("RE_1")
+        if validRemote(rem) then
+            return cacheRemote(rem, "event")
+        end
+    end
+    installHook()
+    return nil
+end
 
-    -- tenta remotes nomeados
+local function probeNamedRemoteEvents()
     local pools = {
-        {RemotesFolder, {"did", "RE_Deflect", "Deflect"}},
-        {GeneratedRemotesFolder, {"RE_1", "RE_Deflect"}},
+        {Remotes, {"did", "RE_Deflect", "Deflect"}},
+        {GenRemotes, {"RE_1", "RE_Deflect"}},
         {TSFolder, {"Deflect", "RE_Deflect"}}
     }
     for _, pool in ipairs(pools) do
         local folder, names = pool[1], pool[2]
         if folder then
-            for _, name in ipairs(names) do
-                if type(name) == "string" then
-                    local remote = folder:FindFirstChild(name)
-                    if isValidRemote(remote) then
-                        parryRemote, parryMode = remote, (remote.Name == "RE_1") and "event" or "buffer"
-                        parryInitialized = false
-                        return parryRemote, parryMode
+            for _, n in ipairs(names) do
+                if type(n) == "string" then
+                    local r = folder:FindFirstChild(n)
+                    if validRemote(r) then
+                        return cacheRemote(r, (r.Name == "RE_1") and "event" or "buffer")
                     end
                 end
             end
         end
     end
-
-    installMetamethodHook()
     return nil
-end
-
--- inicialização do parry
-local function initializeParry()
-    if parryInitialized then
-        return true
-    end
-    local remote, mode = resolveParryRemote()
-    if not remote then
-        return false
-    end
-    if mode == "event" then
-        parryInitialized = true
-        return true
-    end
-    local buf = getBuffer(2)
-    if not buf then
-        return false
-    end
-    parryInitialized = pcall(remote.FireServer, remote, buf)
-    return parryInitialized
-end
-
--- disparo do parry
-local function fireParry(flag)
-    local remote, mode = Probe.getRemote()
-    if not isValidRemote(remote) then
-        return false
-    end
-    if mode == "event" then
-        local ok, err = pcall(remote.FireServer, remote)
-        if not ok then
-            warn(string.format("[Probe] Falha ao disparar evento: %s", tostring(err)))
-        end
-        return ok
-    end
-    local buf = getBuffer(flag or 1)
-    if not buf then
-        return false
-    end
-    local initOk, initialized = pcall(initializeParry)
-    if not initOk or not initialized then
-        warn("[Probe] Inicialização do parry falhou.")
-        return false
-    end
-    local ok, err = pcall(remote.FireServer, remote, buf)
-    if not ok then
-        warn(string.format("[Probe] Falha ao disparar remote: %s", tostring(err)))
-    end
-    return ok
-end
-
--- sincronização da bola
-local _ballSyncRemote, _ballSyncConnection = nil, nil
-
-local function connectBallSyncRemote()
-    refreshServiceRefs()
-    local candidate = RemotesFolder and RemotesFolder:FindFirstChild("BallSyncData")
-    if not (candidate and candidate:IsA("RemoteEvent")) then
-        return false
-    end
-    if candidate == _ballSyncRemote and _ballSyncConnection and _ballSyncConnection.Connected then
-        return true
-    end
-    if _ballSyncConnection then
-        pcall(_ballSyncConnection.Disconnect, _ballSyncConnection)
-    end
-    _ballSyncRemote = candidate
-    return true
 end
 
 -- setup
 function Probe.setup(deps)
     Utils = deps.Utils
-    Players = Utils.getPlayers()
-    ReplicatedStorage = Utils.getReplicatedStorage()
-    initBuffers()
-    installMetamethodHook()
-    resolveParryRemote()
+    _initBufs()
+    installHook()
+    resolveRemote()
 end
 
 -- api pública
 function Probe.refreshRefs()
-    refreshServiceRefs()
+    refreshRefs()
 end
 
 function Probe.resolveRemote()
-    return resolveParryRemote()
+    return resolveRemote()
 end
 
 function Probe.initParry()
-    return initializeParry()
+    if parryInit then
+        return true
+    end
+    local r, m = resolveRemote()
+    if not r then
+        r, m = probeNamedRemoteEvents()
+    end
+    if not r then
+        return false
+    end
+    if m == "event" then
+        parryInit = true
+        return true
+    end
+    local p = makeBuf(2)
+    if not p then
+        return false
+    end
+    parryInit = pcall(r.FireServer, r, p)
+    return parryInit
 end
 
 function Probe.fireParry(flag)
-    return fireParry(flag)
+    local r, m = resolveRemote()
+    if not validRemote(r) then
+        return false
+    end
+    if m == "event" then
+        local ok, err = pcall(r.FireServer, r)
+        return ok
+    end
+    local p
+    if type(buffer) == "table" and type(buffer.fromstring) == "function" then
+        p = buffer.fromstring(flag == 2 and "\2" or "\1")
+    else
+        p = makeBuf(flag or 1)
+    end
+    if not p then
+        return false
+    end
+    local initOk, initialized = pcall(Probe.initParry)
+    if not initOk or not initialized then
+        return false
+    end
+    local ok, err = pcall(r.FireServer, r, p)
+    return ok
 end
 
 function Probe.getRemote()
-    return parryRemote, parryMode
+    return parryR, parryMode
 end
 
 function Probe.invalidateRemote()
-    parryRemote, parryMode, parryInitialized = nil, nil, false
+    parryR, parryMode, parryInit = nil, nil, false
 end
 
-function Probe.bindBallSync(handler, trackFn)
-    if not connectBallSyncRemote() then
+function Probe.bindBallSync(handler, track)
+    refreshRefs()
+    local candidate = Remotes and Remotes:FindFirstChild("BallSyncData")
+    if not (candidate and candidate:IsA("RemoteEvent")) then
         return false
     end
-    if _ballSyncConnection then
-        pcall(_ballSyncConnection.Disconnect, _ballSyncConnection)
-    end
-    _ballSyncConnection = trackFn(_ballSyncRemote.OnClientEvent:Connect(handler))
+    track(candidate.OnClientEvent:Connect(handler))
     return true
 end
 
-function Probe.connectBallSyncRemote()
-    return connectBallSyncRemote()
-end
-
-function Probe.setHookEnabled(value)
-    _hookEnabled = (value ~= false)
-end
-
-function Probe.isHookInstalled()
-    return _hooked
-end
-
+-- Registra no estado global para compatibilidade com executores
 if _G.ExodusModules then
     _G.ExodusModules.Probe = Probe
 end
