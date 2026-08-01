@@ -315,6 +315,15 @@ end
 -- ball sync
 local function onBallSync(d)
     AutoParry.onBallSync(d)
+    if AutoClash and AutoClash.tryInlineActivate then
+        local lp = Utils.getLocalPlayer()
+        local ch = lp and lp.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        local ball = GameInfo.getBall()
+        if hrp and hrp.Parent and ball and ball.Parent then
+            pcall(AutoClash.tryInlineActivate, now(), hrp, ball, _G.PhantomConfig)
+        end
+    end
 end
 local function connectBallSync()
     return Probe.bindBallSync(onBallSync, Utils.track)
