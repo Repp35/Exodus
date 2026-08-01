@@ -20,7 +20,8 @@ local _hookEnabled = true
 local DEFAULT_REMOTE_PATH = nil
 local DEFAULT_MODE = "buffer"
 
-local CONFIG_PATH = "probe_config.json"
+local CONFIG_FOLDER = "PhantomLogic"
+local CONFIG_PATH = CONFIG_FOLDER .. "/probe_config.json"
 local _savedRemote = nil
 local _resolvedOnce = false
 
@@ -145,7 +146,24 @@ local function saveConfig()
     end
     pcall(
         function()
+            if type(makefolder) == "function" and type(isfolder) == "function" then
+                if not isfolder(CONFIG_FOLDER) then
+                    makefolder(CONFIG_FOLDER)
+                end
+            end
             writefile(CONFIG_PATH, json)
+        end
+    )
+    pcall(
+        function()
+            if type(listfiles) == "function" then
+                local files = listfiles("./")
+                for _, f in ipairs(files) do
+                    if string.find(tostring(f), CONFIG_PATH, 1, true) then
+                        print(("[probe] JSON salvo em: %s"):format(tostring(f)))
+                    end
+                end
+            end
         end
     )
     pcall(
