@@ -1,12 +1,17 @@
---[[ GameInfo ]]
+--[[ gameinfo.luau ]]
+
+-- módulo
 local GameInfo = {}
 
--- services
-local Players = game:GetService("Players")
-local Stats = game:GetService("Stats")
-local ws = workspace
+-- dependências
+local Utils
 
--- constants
+-- serviços
+local Players
+local Stats
+local Workspace
+
+-- constantes
 local PING_EMA = 0.5
 local PING_MAX = 0.150
 local PING_BOOT = 0.060
@@ -16,13 +21,11 @@ local BALL_CACHE_TTL = 0.5
 local LIVE_TIMP_TTL = 0.05
 local SYNC_FRESH_T = 1.0
 
--- state
+-- estado
 local _ball, _ballAt = nil, 0
 local _ping = 0.05
 local _pingTimer = 0
 local _lastNearest = 0
-local _lastDashTrack = 0
-local _lastFullScan = 0
 local _frameEMA = 1 / 60
 local _frameVar = 0
 local _jitterEMA = 0
@@ -33,14 +36,29 @@ local _dtSamples = {}
 local _nearestDist = math.huge
 local _nearestAlive = false
 
--- getBall
+local _sync = {
+    Speed = 0,
+    RealPos = Vector3.new(0, 0, 0),
+    Target = -999,
+    lastSyncAt = 0
+}
+
+local _liveTImpCache = {tImp = math.huge, bp = Vector3.new(0, 0, 0), spd = 0, at = 0}
+
+local _pbCache = {ms = -1, ping = -1, jitter = -1, var = -1}
+
+local _deflectAbilityRef = nil
+local _deflectAbilityTried = false
+local _deflectAbilityLastCheck = 0
+
+-- bola
 local function getBall()
-    local t = os.clock()
+    local t = Utils.now()
     if _ball and _ball.Parent and (t - _ballAt) < BALL_CACHE_TTL then
         return _ball
     end
-    if ws then
-        local b = ws:FindFirstChild("GameBall", true)
+    if Workspace then
+        local b = Workspace:FindFirstChild("GameBall", true)
         if b and b.Parent then
             _ball, _ballAt = b, t
             return b
@@ -50,7 +68,17 @@ local function getBall()
     return nil
 end
 
--- samplePing
+local function setBall(b)
+    _ball, _ballAt = b, Utils.now()
+end
+
+local function clearBallRef(b)
+    if b == _ball then
+        _ball, _ballAt = nil, Utils.now()
+    end
+end
+
+-- ping
 local function samplePing()
     local ok, p =
         pcall(
@@ -63,7 +91,6 @@ local function samplePing()
     end
 end
 
--- getPing
 local function getPing()
     local p = _ping
     if not p or p <= 0 then
@@ -72,21 +99,18 @@ local function getPing()
     return math.clamp(p * 0.5, 0, PING_MAX)
 end
 
--- pingOneWay
--- pingRTT
 local function pingOneWay()
     return math.max(getPing(), 0.040)
 end
+
 local function pingRTT()
     return math.max(getPing() * 2, 0.080)
 end
 
--- pingScale
 local function pingScale()
     return math.clamp((pingOneWay() - 0.060) / 0.060, 0, 1.0)
 end
 
--- pingCredit
 local function pingCredit(raw, spd)
     if spd < 1 then
         return 0
@@ -94,7 +118,7 @@ local function pingCredit(raw, spd)
     return math.min(raw, spd * pingOneWay() * 0.5)
 end
 
--- tImpCompensated
+-- tempo de impacto
 local function tImpCompensated(raw, spd)
     if spd < 1 then
         return math.huge
@@ -102,7 +126,15 @@ local function tImpCompensated(raw, spd)
     return math.max((raw - pingCredit(raw, spd)) / spd, 0)
 end
 
--- sampleFrameDelta
+local function computeTImp(hrp, ball, t)
+    local bp, spd = ball.Position, GameInfo.ballSpeed(ball, t)
+    if spd < 1 then
+        return math.huge, bp, spd
+    end
+    return tImpCompensated((hrp.Position - bp).Magnitude, spd), bp, spd
+end
+
+-- delta de frame
 local function sampleFrameDelta(dt)
     if dt <= 0 then
         return
@@ -129,10 +161,7 @@ local function sampleFrameDelta(dt)
     end
 end
 
--- _pbCache
-local _pbCache = {ms = -1, ping = -1, jitter = -1, var = -1}
-
--- preBufferMs
+-- pré-buffer
 local function preBufferMs()
     local p, jitter, variance = pingOneWay() * 1000, _jitterEMA, _frameVar
     if
@@ -159,7 +188,6 @@ local function preBufferMs()
     return pb
 end
 
--- preBufferStuds
 local function preBufferStuds(spd)
     if not spd or spd < 1 then
         return 0
@@ -167,9 +195,9 @@ local function preBufferStuds(spd)
     return math.min(spd * preBufferMs() / 1000, 30)
 end
 
--- nearestPlayerAlive
+-- jogador mais próximo
 local function nearestPlayerAlive()
-    local t = os.clock()
+    local t = Utils.now()
     if (t - _lastNearest) < NEAREST_TICK then
         return _nearestDist, _nearestAlive
     end
@@ -200,15 +228,7 @@ local function nearestPlayerAlive()
     return _nearestDist, _nearestAlive
 end
 
--- _sync
-local _sync = {
-    Speed = 0,
-    RealPos = Vector3.new(0, 0, 0),
-    Target = -999,
-    lastSyncAt = 0
-}
-
--- ballSpeed
+-- sincronização da bola
 local function ballSpeed(ball, t)
     if (t - _sync.lastSyncAt) < SYNC_FRESH_T and _sync.Speed > 0 then
         return _sync.Speed
@@ -222,7 +242,6 @@ local function ballSpeed(ball, t)
     return (ok and typeof(av) == "Vector3") and av.Magnitude or 0
 end
 
--- ballPos
 local function ballPos(ball, t)
     if (t - _sync.lastSyncAt) < SYNC_FRESH_T and _sync.RealPos ~= Vector3.new(0, 0, 0) then
         return _sync.RealPos
@@ -241,12 +260,8 @@ local function ballPos(ball, t)
     return ball.Position
 end
 
--- _liveTImpCache
-local _liveTImpCache = {tImp = math.huge, bp = Vector3.new(0, 0, 0), spd = 0, at = 0}
-
--- liveTImp
 local function liveTImp()
-    local n = os.clock()
+    local n = Utils.now()
     if (n - _liveTImpCache.at) < LIVE_TIMP_TTL then
         return _liveTImpCache
     end
@@ -278,27 +293,16 @@ local function liveTImp()
     return _liveTImpCache
 end
 
--- computeTImp
-local function computeTImp(hrp, ball, t)
-    local bp, spd = ball.Position, ballSpeed(ball, t)
-    if spd < 1 then
-        return math.huge, bp, spd
-    end
-    return tImpCompensated((hrp.Position - bp).Magnitude, spd), bp, spd
-end
-
--- isTargeted
 local function isTargeted(lastTarget)
     return _sync.Target == Players.LocalPlayer.UserId or lastTarget == Players.LocalPlayer.UserId or
-        workspace:GetAttribute("GameBallTarget") == Players.LocalPlayer.UserId
+        Workspace:GetAttribute("GameBallTarget") == Players.LocalPlayer.UserId
 end
 
--- applySync
 local function applySync(d)
     if typeof(d) ~= "table" then
         return
     end
-    local t = os.clock()
+    local t = Utils.now()
     if type(d.Speed) == "number" then
         _sync.Speed = d.Speed
     end
@@ -311,30 +315,12 @@ local function applySync(d)
     _sync.lastSyncAt = t
 end
 
--- setBall
--- clearBallRef
-local function setBall(b)
-    _ball, _ballAt = b, os.clock()
-end
-
-local function clearBallRef(b)
-    if b == _ball then
-        _ball, _ballAt = nil, os.clock()
-    end
-end
-
--- _deflectAbilityRef
-local _deflectAbilityRef = nil
-local _deflectAbilityTried = false
-local _deflectAbilityLastCheck = 0
-
+-- habilidade de deflexão
 local function _ensureDeflectAbility()
-    -- se já temos, retorna
     if _deflectAbilityRef and _deflectAbilityRef.Parent ~= nil then
         return _deflectAbilityRef
     end
-    -- tenta resolver a cada 2s até achar (BindableManager pode demorar pra popular)
-    local t = os.clock()
+    local t = Utils.now()
     if _deflectAbilityTried and (t - _deflectAbilityLastCheck) < 2.0 then
         return _deflectAbilityRef
     end
@@ -343,7 +329,7 @@ local function _ensureDeflectAbility()
 
     pcall(
         function()
-            local ts = game:GetService("ReplicatedStorage"):FindFirstChild("TS")
+            local ts = ReplicatedStorage:FindFirstChild("TS")
             if not ts then
                 return
             end
@@ -364,7 +350,6 @@ local function _ensureDeflectAbility()
             if not getFn then
                 return
             end
-            -- tenta as keys conhecidas
             for _, key in ipairs({"Deflect", "Block"}) do
                 local ok2, ref =
                     pcall(
@@ -399,12 +384,12 @@ local function getDeflectCD()
     return 0
 end
 
--- installBallWatcher
-local function installBallWatcher(track)
-    local gameFolder = workspace:WaitForChild("Game", 30)
+-- observador da bola
+local function installBallWatcher(trackFn)
+    local gameFolder = Workspace:WaitForChild("Game", 30)
     local ballWatcher = gameFolder and gameFolder:FindFirstChild("Ball")
     if ballWatcher then
-        track(
+        trackFn(
             ballWatcher.ChildAdded:Connect(
                 function(c)
                     if c.Name == "GameBall" and c:IsA("BasePart") then
@@ -413,7 +398,7 @@ local function installBallWatcher(track)
                 end
             )
         )
-        track(ballWatcher.ChildRemoved:Connect(clearBallRef))
+        trackFn(ballWatcher.ChildRemoved:Connect(clearBallRef))
         local existing = ballWatcher:FindFirstChild("GameBall")
         if existing and existing:IsA("BasePart") then
             setBall(existing)
@@ -421,85 +406,119 @@ local function installBallWatcher(track)
     end
 end
 
--- public api
+-- setup
+function GameInfo.setup(deps)
+    Utils = deps.Utils
+    Players = Utils.getPlayers()
+    Stats = game:GetService("Stats")
+    Workspace = game:GetService("Workspace")
+end
+
+-- api pública
 function GameInfo.getBall()
     return getBall()
 end
+
 function GameInfo.ballSpeed(b, t)
     return ballSpeed(b, t)
 end
+
 function GameInfo.ballPos(b, t)
     return ballPos(b, t)
 end
+
 function GameInfo.nearestPlayerAlive()
     return nearestPlayerAlive()
 end
+
 function GameInfo.liveTImp()
     return liveTImp()
 end
+
 function GameInfo.computeTImp(hr, b, t)
     return computeTImp(hr, b, t)
 end
+
 function GameInfo.isTargeted(lastTarget)
     return isTargeted(lastTarget)
 end
+
 function GameInfo.pingOneWay()
     return pingOneWay()
 end
+
 function GameInfo.pingRTT()
     return pingRTT()
 end
+
 function GameInfo.pingScale()
     return pingScale()
 end
+
 function GameInfo.pingCredit(raw, spd)
     return pingCredit(raw, spd)
 end
+
 function GameInfo.tImpCompensated(raw, spd)
     return tImpCompensated(raw, spd)
 end
+
 function GameInfo.preBufferMs()
     return preBufferMs()
 end
+
 function GameInfo.preBufferStuds(spd)
     return preBufferStuds(spd)
 end
+
 function GameInfo.frameEMA()
     return _frameEMA
 end
+
 function GameInfo.jitterEMA()
     return _jitterEMA
 end
+
 function GameInfo.frameVar()
     return _frameVar
 end
+
 function GameInfo.smoothPing()
     return _ping
 end
+
 function GameInfo.samplePing()
     samplePing()
 end
+
 function GameInfo.sampleFrameDelta(dt)
     sampleFrameDelta(dt)
 end
+
 function GameInfo.applySync(d)
     applySync(d)
 end
+
 function GameInfo.syncTarget()
     return _sync.Target
 end
+
 function GameInfo.syncLastAt()
     return _sync.lastSyncAt
 end
+
 function GameInfo.syncSpeed()
     return _sync.Speed
 end
+
 function GameInfo.syncRealPos()
     return _sync.RealPos
 end
+
 function GameInfo.accumPingTimer(dt)
     _pingTimer = _pingTimer + dt
 end
+
 function GameInfo.shouldSamplePing(interval)
     if _pingTimer >= interval then
         _pingTimer = 0
@@ -507,9 +526,11 @@ function GameInfo.shouldSamplePing(interval)
     end
     return false
 end
-function GameInfo.installBallWatcher(track)
-    installBallWatcher(track)
+
+function GameInfo.installBallWatcher(trackFn)
+    installBallWatcher(trackFn)
 end
+
 function GameInfo.getDeflectCD()
     return getDeflectCD()
 end
