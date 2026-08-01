@@ -197,6 +197,15 @@ local function activateBurst(t, config)
     S.clashHoldUntil      = t + CLASH.BURST_ON_MS
     S.lastClashReact      = t
     S.clashOffAt          = 0
+    -- Disparo real do parry: se ninguém registrou _G.PhantomOnBurst, faz um
+    -- fallback chamando AutoParry.fire() diretamente. Sem isso, o clash
+    -- ativava o estado mas NENHUM clique era disparado.
+    local burst = _G.PhantomOnBurst
+    if type(burst) == "function" then
+        pcall(burst)
+    elseif AutoParry and type(AutoParry.fire) == "function" then
+        pcall(AutoParry.fire)
+    end
 end
 
 local function clearClash()
