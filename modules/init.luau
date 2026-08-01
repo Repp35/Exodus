@@ -100,7 +100,10 @@ function Init.start()
         end)
     end
 
-    Utils.track(Utils.getPlayers().CharacterAdded:Connect(setupCharacter))
+    local lp = Utils.getLocalPlayer()
+    if lp then
+        Utils.track(lp.CharacterAdded:Connect(setupCharacter))
+    end
     if Utils.getLocalPlayer().Character then
         setupCharacter(Utils.getLocalPlayer().Character)
     end
