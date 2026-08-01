@@ -1,4 +1,4 @@
---[[ gameinfo.luau ]]
+--[[ game info ]]
 
 -- módulo
 local GameInfo = {}
@@ -161,7 +161,6 @@ local function sampleFrameDelta(dt)
     end
 end
 
--- pré-buffer
 local function preBufferMs()
     local p, jitter, variance = pingOneWay() * 1000, _jitterEMA, _frameVar
     if
@@ -533,6 +532,10 @@ end
 
 function GameInfo.getDeflectCD()
     return getDeflectCD()
+end
+
+if _G.ExodusModules then
+    _G.ExodusModules.GameInfo = GameInfo
 end
 
 return GameInfo
