@@ -223,6 +223,7 @@ local function makeDraggable(handle, target, onDragEnd)
     end
 end
 
+-- gradiente animado
 local flowingGradients = {}
 local function registerFlow(obj)
     flowingGradients[#flowingGradients + 1] = attachFlow(obj)
@@ -440,6 +441,7 @@ local colRight
 -- kill button
 local killBtn
 
+-- componentes
 local function cardFrame(yPos, h, parent)
     local f =
         inst(
@@ -798,6 +800,7 @@ local function createSpamCard(yPos, parent)
         return mode == "Hold" and C.hold or C.toggleOn
     end
     local modeBtn = makeBtn(config.SpamMode or "Toggle", 8 + halfW + 14, 64, halfW, 32, f, modeColor(config.SpamMode))
+
     trackConn(modeBtn.Activated:Connect(
         function()
             local currentConfig = Utils.getConfig()
@@ -867,17 +870,15 @@ local function togglePanel()
     end
 end
 
--- inicialização da ui
-function PhantomUI.init(deps)
+-- inicialização
+function PhantomUI.setup(deps)
     Utils = deps.Utils
 
--- verificar e destruir gui
     local old = CoreGui:FindFirstChild("PhantomUISystem")
     if old then
         old:Destroy()
     end
 
--- screen gui
     screenGui =
         inst(
         "ScreenGui",
@@ -891,7 +892,6 @@ function PhantomUI.init(deps)
     )
     startFlowingLoop(screenGui)
 
--- floating button
     floatingButton =
         inst(
         "TextButton",
@@ -912,7 +912,6 @@ function PhantomUI.init(deps)
     corner(floatingButton, 999)
     registerFlow(stroke(floatingButton, C.accent, 2))
 
--- clash ball
     local config = Utils.getConfig()
     local clashX = config.ClashBallX or 14
     local clashY = config.ClashBallY or (viewport().Y / 2 - CLASH_SIZE / 2)
@@ -981,7 +980,6 @@ function PhantomUI.init(deps)
         end
     ))
 
--- mini gui spam
     local miniX = config.MiniX or (viewport().X - MINI_W - 14)
     local miniY = config.MiniY or (viewport().Y / 2 - MINI_H / 2)
     local MINI_OFF_X = viewport().X + 30
@@ -1110,7 +1108,6 @@ function PhantomUI.init(deps)
         end
     )
 
--- painel principal
     configPanel =
         inst(
         "Frame",
@@ -1129,7 +1126,6 @@ function PhantomUI.init(deps)
     corner(configPanel, 16)
     stroke(configPanel, C.accent, 1.5)
 
--- partículas de fundo
     particleLayer =
         inst(
         "Frame",
@@ -1154,7 +1150,6 @@ function PhantomUI.init(deps)
         end
     )
 
--- title bar
     titleBar =
         inst(
         "Frame",
@@ -1227,8 +1222,8 @@ function PhantomUI.init(deps)
             twPlay(closeButton, 0.12, {BackgroundTransparency = 0.3})
         end
     ))
+    trackConn(closeButton.Activated:Connect(togglePanel))
 
--- colunas
     colLeft =
         inst(
         "Frame",
@@ -1252,7 +1247,6 @@ function PhantomUI.init(deps)
         }
     )
 
--- kill button
     killBtn =
         inst(
         "TextButton",
@@ -1271,188 +1265,50 @@ function PhantomUI.init(deps)
     )
     corner(killBtn, 6)
 
-    if not UIS.TouchEnabled then
-        trackConn(killBtn.MouseEnter:Connect(
-            function()
-                twPlay(killBtn, 0.12, {BackgroundColor3 = Color3.fromRGB(170, 35, 35)})
-            end
-        ))
-        trackConn(killBtn.MouseLeave:Connect(
-            function()
-                twPlay(killBtn, 0.12, {BackgroundColor3 = C.redDark})
-            end
-        ))
-    end
-
--- auto clash
-    local yL = 4
-    local _track, _thumb
-    local function buildAutoClash(y)
-        local f = cardFrame(y, 52, colLeft)
-        inst(
-            "TextLabel",
-            {
-                Size = UDim2.new(0.55, 0, 1, 0),
-                Position = UDim2.new(0, 14, 0, 0),
-                BackgroundTransparency = 1,
-                Text = "Auto Clash",
-                TextColor3 = C.text,
-                TextSize = 14,
-                Font = Enum.Font.GothamSemibold,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                ZIndex = 7,
-                Parent = f
-            }
-        )
-        local currentConfig = Utils.getConfig()
-        local track, thumb, setVisual = makeToggle(f, currentConfig.AutoClash)
-        _track, _thumb = track, thumb
-        trackConn(
-            inst(
-                "TextButton",
-                {
-                    Size = UDim2.new(1, 0, 1, 0),
-                    BackgroundTransparency = 1,
-                    Text = "",
-                    ZIndex = 9,
-                    Parent = f
-                }
-            ).Activated:Connect(
-                function()
-                    local newConfig = Utils.getConfig()
-                    newConfig.AutoClash = not newConfig.AutoClash
-                    Utils.setConfig(newConfig)
-                    setVisual(newConfig.AutoClash)
-                    setClashBall(newConfig.AutoClash, true)
-                    paintClashBall()
-                end
-            )
-        )
-        return y + 52 + CARD_GAP
-    end
-    yL = createToggleCard("Auto Parry", "AutoParry", yL, colLeft)
-    yL = buildAutoClash(yL)
-    yL =
-        createToggleCard(
-        "Mini Clash UI",
-        "ClashBallVisible",
-        yL,
-        colLeft,
-        function(v)
-            if v then
-                showClashBall(true)
-            else
-                if UIState.clashBallOn then
-                    setClashBall(false)
-                    syncAutoClashToggle()
-                end
-                showClashBall(false)
-            end
-        end
-    )
-    autoClashTrack, autoClashThumb = _track, _thumb
-
-    local yR = 4
-    local cpsNextY, cpsTitleLabel, cpsValueLabel = createCPSSelector(yR, colRight)
-    yR = cpsNextY
-    yR = createKeybindSelector(yR, colRight)
-    yR = createSpamCard(yR, colRight)
-
-    makeDraggable(
-        titleBar,
-        configPanel,
-        function()
-            local currentConfig = Utils.getConfig()
-            currentConfig.PanelX = configPanel.Position.X.Offset
-            currentConfig.PanelY = configPanel.Position.Y.Offset
-            Utils.setConfig(currentConfig)
-        end
-    )
-
-    trackConn(closeButton.Activated:Connect(
-        function()
-            if UIState.panelOpen then
-                togglePanel()
-            end
-        end
-    ))
-
--- keybinds globais
-    trackConn(
-        UIS.InputBegan:Connect(
-            function(input, gpe)
-                if gpe then
-                    return
-                end
-                local currentConfig = Utils.getConfig()
-                if currentConfig.Keybind and input.KeyCode == currentConfig.Keybind then
-                    togglePanel()
-                    return
-                end
-                if currentConfig.SpamKeybind and input.KeyCode == currentConfig.SpamKeybind then
-                    if currentConfig.SpamMode == "Hold" then
-                        setSpam(true)
-                    else
-                        setSpam(not UIState.spamOn)
-                    end
-                end
-            end
-        )
-    )
-
-    trackConn(
-        UIS.InputEnded:Connect(
-            function(input)
-                local currentConfig = Utils.getConfig()
-                if not currentConfig.SpamKeybind or input.KeyCode ~= currentConfig.SpamKeybind then
-                    return
-                end
-                if currentConfig.SpamMode == "Hold" then
-                    setSpam(false)
-                end
-            end
-        )
-    )
-
--- kill button
     trackConn(killBtn.Activated:Connect(
         function()
             Utils.stop()
-
             for _, c in ipairs(UIState.connections) do
-                safe(
-                    function()
-                        c:Disconnect()
-                    end
-                )
+                safe(function() c:Disconnect() end)
             end
             UIState.connections = {}
-
             twPlay(configPanel, 0.25, {BackgroundTransparency = 1, Size = UDim2.new(0, PW * 0.85, 0, PH * 0.85)}, EASE_OUT)
             twPlay(floatingButton, 0.25, {BackgroundTransparency = 1, TextTransparency = 1, Size = UDim2.new(0, 0, 0, 0)})
             _wait(0.3)
-
-            safe(
-                function()
-                    screenGui:Destroy()
-                end
-            )
-            print(("[%s v%s] Encerrado."):format(SCRIPT_NAME, SCRIPT_VERSION))
+            safe(function() screenGui:Destroy() end)
         end
     ))
+
+    local yL = 4
+    yL = createToggleCard("Auto Parry", "AutoParry", yL, colLeft)
+    
+    local function buildAutoClash(y)
+        local f = cardFrame(y, 52, colLeft)
+        inst("TextLabel", {Size = UDim2.new(0.55, 0, 1, 0), Position = UDim2.new(0, 14, 0, 0), BackgroundTransparency = 1, Text = "Auto Clash", TextColor3 = C.text, TextSize = 14, Font = Enum.Font.GothamSemibold, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7, Parent = f})
+        local track, thumb, setVisual = makeToggle(f, config.AutoClash)
+        autoClashTrack, autoClashThumb = track, thumb
+        trackConn(inst("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "", ZIndex = 9, Parent = f}).Activated:Connect(function()
+            config.AutoClash = not config.AutoClash
+            Utils.setConfig(config)
+            setVisual(config.AutoClash)
+            setClashBall(config.AutoClash, true)
+            paintClashBall()
+        end))
+        return y + 52 + CARD_GAP
+    end
+    yL = buildAutoClash(yL)
+    yL = createToggleCard("Mini Clash UI", "ClashBallVisible", yL, colLeft, function(v)
+        showClashBall(v)
+    end)
+
+    local yR = 4
+    yR = createCPSSelector(yR, colRight)
+    yR = createKeybindSelector(yR, colRight)
+    yR = createSpamCard(yR, colRight)
 
     if config.ClashBallVisible then
         clashBall.Position = UDim2.new(0, clashX, 0, clashY)
     end
-
-    print(
-        ("[%s v%s] carregada | tecla: %s"):format(
-            SCRIPT_NAME,
-            SCRIPT_VERSION,
-            config.Keybind and config.Keybind.Name or "?"
-        )
-    )
-
     setSpam(Utils.isManualSpamActive())
 end
 
