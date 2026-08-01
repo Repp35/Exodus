@@ -1,4 +1,4 @@
---[[ autoclash.luau ]]
+--[[ auto clash ]]
 
 -- módulo
 local AutoClash = {}
@@ -197,8 +197,6 @@ local function activateBurst(t, config)
     S.clashHoldUntil      = t + CLASH.BURST_ON_MS
     S.lastClashReact      = t
     S.clashOffAt          = 0
-    -- Callback para o init.luau, se necessário
-    -- if Utils.onBurst then Utils.onBurst end
 end
 
 local function clearClash()
@@ -395,14 +393,12 @@ local function shouldDeactivateClash(t, ctx)
     if not hum then return true end
     if not (ctx and ctx.valid) then return true end
 
-    -- Usar um valor razoável para a distância máxima da bola, não uma constante mágica
     local MAX_BALL_DIST_TO_DEACTIVATE = 50
     if ctx.bDist > MAX_BALL_DIST_TO_DEACTIVATE then return true end
 
     local deactRad = math.clamp(P.DEFLECT_R + 14, 18, 30)
     if ctx.bDist > deactRad then return true end
 
-    -- tImp cap deve ser calculado com base na velocidade, não um valor fixo
     local tImpCap = ctx.spd > 0 and ((CLASH.T_IMP_CAP_BASE * 60) / math.max(ctx.spd, 1)) or CLASH.T_IMP_CAP_FLOOR
     if ctx.tImp > tImpCap then return true end
 
@@ -542,7 +538,6 @@ local function evaluateClash(t, hr, ball, config)
     end
 end
 
--- fast-path inline
 local function tryInlineActivate(t, hr, ball, config)
     if S.clashOn then return end
     if not config or config.AutoClash == false or Utils.isManualSpamActive() then return end
@@ -671,7 +666,6 @@ local function updateDashTrack(t)
     end
 end
 
--- anti-dash
 local function reportDash(player)
     if not player or not Utils then return end
     local lp = Utils.getLocalPlayer()
@@ -756,7 +750,7 @@ function AutoClash.setup(deps)
     AutoParry = deps.AutoParry
     local lp = Utils.getLocalPlayer()
     _localUserId = lp and lp.UserId or -1
-    -- Callbacks para Utils
+-- callbacks para utils
     Utils.setOnClashOn(function() return S.clashOn end)
     Utils.setOnTarget(onTarget)
     Utils.setOnTeleport(clearClash)
@@ -841,6 +835,10 @@ end
 
 function AutoClash.recordFire(t)
     S.lastFireAt = t
+end
+
+if _G.ExodusModules then
+    _G.ExodusModules.AutoClash = AutoClash
 end
 
 return AutoClash
