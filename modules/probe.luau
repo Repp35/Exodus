@@ -328,29 +328,48 @@ function Probe.initParry()
 end
 
 function Probe.fireParry(flag)
-    local r, m = resolveRemote()
-    if not validRemote(r) then
-        return false
-    end
-    if m == "event" then
-        local ok, err = pcall(r.FireServer, r)
+    -- Tenta até 2 vezes. Se o FireServer falhar (remote errado, args errados,
+    -- ou qualquer pcall erro), invalida e re-resolve o remote antes de tentar
+    -- de novo. Isso elimina o erro "argument #1 expects a string, but CFrame
+    -- was passed" causado por cache de remote incorreto.
+    local function attempt()
+        local r, m = resolveRemote()
+        if not validRemote(r) then
+            return false
+        end
+        if m == "event" then
+            local ok, err = pcall(r.FireServer, r)
+            if not ok then
+                warn(("[phantom_logic] fireParry.event fail: %s"):format(tostring(err)))
+            end
+            return ok
+        end
+        local p
+        if type(buffer) == "table" and type(buffer.fromstring) == "function" then
+            p = buffer.fromstring(flag == 2 and "\2" or "\1")
+        else
+            p = makeBuf(flag or 1)
+        end
+        if not p then
+            return false
+        end
+        local initOk, initialized = pcall(Probe.initParry)
+        if not initOk or not initialized then
+            return false
+        end
+        local ok, err = pcall(r.FireServer, r, p)
+        if not ok then
+            warn(("[phantom_logic] fireParry.fire fail: %s"):format(tostring(err)))
+        end
         return ok
     end
-    local p
-    if type(buffer) == "table" and type(buffer.fromstring) == "function" then
-        p = buffer.fromstring(flag == 2 and "\2" or "\1")
-    else
-        p = makeBuf(flag or 1)
+
+    if attempt() then
+        return true
     end
-    if not p then
-        return false
-    end
-    local initOk, initialized = pcall(Probe.initParry)
-    if not initOk or not initialized then
-        return false
-    end
-    local ok, err = pcall(r.FireServer, r, p)
-    return ok
+    -- Falhou: invalida o remote cacheado e re-tenta UMA vez.
+    Probe.invalidateRemote()
+    return attempt()
 end
 
 function Probe.getRemote()
@@ -359,6 +378,16 @@ end
 
 function Probe.invalidateRemote()
     parryR, parryMode, parryInit = nil, nil, false
+end
+
+-- alias usado pelo init pra revalidar
+function Probe.invalidate()
+    parryR, parryMode, parryInit = nil, nil, false
+end
+
+-- alias usado pelo init pra varrer pools nomeados (did/RE_Deflect/Deflect)
+function Probe.probeNamed()
+    return probeNamedRemoteEvents()
 end
 
 function Probe.bindBallSync(handler, track)
