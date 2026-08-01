@@ -90,7 +90,7 @@ local function getFullPath(inst)
     if not (typeof(inst) == "Instance" and inst.Parent) then
         return inst and inst.Name or "?"
     end
-    local parts = {inst.Name}
+    local parts = { inst.Name }
     local cur = inst.Parent
     while cur and cur ~= game do
         table.insert(parts, 1, cur.Name)
@@ -121,13 +121,9 @@ local function saveConfig()
     if not (parryR and validRemote(parryR)) then
         return false
     end
-    local ok, http =
-        pcall(
-        function()
-            local s = game:GetService("HttpService")
-            return s and s.JSONEncode and s.JSONDecode
-        end
-    )
+    local ok, http = pcall(function()
+        return game:GetService("HttpService")
+    end)
     if not ok or not http then
         return false
     end
@@ -138,39 +134,42 @@ local function saveConfig()
         mode = parryMode or "buffer",
         buffer = (parryMode == "buffer") and "\\1" or nil,
         captured_at = os.time(),
-        usage = string.format('%s:FireServer(buffer.fromstring("\\1"))', getFullPath(parryR))
+        usage = string.format('%s:FireServer(buffer.fromstring("\\1"))', getFullPath(parryR)),
     }
     local ok2, json = pcall(http.JSONEncode, http, cfg)
     if not ok2 then
         return false
     end
-    pcall(
-        function()
-            if type(makefolder) == "function" and type(isfolder) == "function" then
-                if not isfolder(CONFIG_FOLDER) then
-                    makefolder(CONFIG_FOLDER)
+    pcall(function()
+        if type(makefolder) == "function" and type(isfolder) == "function" then
+            if not isfolder(CONFIG_FOLDER) then
+                local ok3, err3 = pcall(makefolder, CONFIG_FOLDER)
+                print(("[probe] makefolder('%s') => %s"):format(CONFIG_FOLDER, tostring(ok3 and "ok" or err3)))
+            else
+                print(("[probe] pasta '%s' ja existe"):format(CONFIG_FOLDER))
+            end
+        else
+            print("[probe] executor nao tem makefolder/isfolder")
+        end
+    end)
+    pcall(function()
+        local ok3, err3 = pcall(writefile, CONFIG_PATH, json)
+        print(("[probe] writefile('%s') => %s"):format(CONFIG_PATH, tostring(ok3 and "ok" or err3)))
+    end)
+    pcall(function()
+        if type(listfiles) == "function" then
+            local files = listfiles("./")
+            for _, f in ipairs(files) do
+                if string.find(tostring(f), CONFIG_PATH, 1, true) then
+                    print(("[probe] JSON salvo em: %s"):format(tostring(f)))
                 end
             end
-            writefile(CONFIG_PATH, json)
         end
-    )
-    pcall(
-        function()
-            if type(listfiles) == "function" then
-                local files = listfiles("./")
-                for _, f in ipairs(files) do
-                    if string.find(tostring(f), CONFIG_PATH, 1, true) then
-                        print(("[probe] JSON salvo em: %s"):format(tostring(f)))
-                    end
-                end
-            end
-        end
-    )
-    pcall(
-        function()
-            print(("[probe] remote salvo em %s -> %s"):format(CONFIG_PATH, getFullPath(parryR)))
-        end
-    )
+    end)
+    pcall(function()
+        print(("[probe] remote salvo em %s -> %s"):format(CONFIG_PATH, getFullPath(parryR)))
+    end)
+    _savedRemote = cfg
     return true
 end
 
@@ -185,12 +184,9 @@ local function loadConfig()
     if not ok or type(content) ~= "string" then
         return nil
     end
-    local ok2, http =
-        pcall(
-        function()
-            return game:GetService("HttpService")
-        end
-    )
+    local ok2, http = pcall(function()
+        return game:GetService("HttpService")
+    end)
     if not ok2 then
         return nil
     end
@@ -222,66 +218,29 @@ local function installHook()
     if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" or type(checkcaller) ~= "function" then
         return false
     end
-    local ok, err =
-        pcall(
-        function()
-            _oldNamecall =
-                hookmetamethod(
-                game,
-                "__namecall",
-                function(self, ...)
-                    local method = getnamecallmethod()
-                    if _hookEnabled and not checkcaller() and (method == "FireServer" or method == "fireServer") then
-                        local args = {...}
-                        local isPayload = false
+    local ok, err = pcall(function()
+        _oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            if _hookEnabled and not checkcaller() then
+                local method = getnamecallmethod()
+                if method == "FireServer" or method == "fireServer" then
+                    if typeof(self) == "Instance" and self:IsA("RemoteEvent") then
+                        local args = { ... }
                         local a1 = args[1]
                         local t = typeof(a1)
                         if t == "buffer" then
-                            isPayload = true
+                            cacheRemote(self, "buffer")
                         elseif t == "string" then
-                            local ok2 = pcall(string.find, a1, "\1", 1, true)
-                            if ok2 then
-                                isPayload = true
+                            local ok2, found = pcall(string.find, a1, "\1", 1, true)
+                            if ok2 and found then
+                                cacheRemote(self, "buffer")
                             end
                         end
-                        if
-                            isPayload or
-                                (typeof(self) == "Instance" and self:IsA("RemoteEvent") and self.Name == "RemoteEvent")
-                         then
-                            cacheRemote(self, "buffer")
-                        end
                     end
-                    return _oldNamecall(self, ...)
                 end
-            )
-
-            _oldIndex =
-                hookmetamethod(
-                game,
-                "__index",
-                function(self, key)
-                    if
-                        _hookEnabled and not checkcaller() and (key == "FireServer" or key == "fireServer") and
-                            typeof(self) == "Instance" and
-                            self:IsA("RemoteEvent")
-                     then
-                        if
-                            self.Name == "RemoteEvent" or
-                                (self.Parent and type(self.Parent.Name) == "string" and
-                                    string.find(self.Parent.Name, "Remote"))
-                         then
-                            task.spawn(
-                                function()
-                                    cacheRemote(self, "buffer")
-                                end
-                            )
-                        end
-                    end
-                    return _oldIndex(self, key)
-                end
-            )
-        end
-    )
+            end
+            return _oldNamecall(self, ...)
+        end)
+    end)
     if ok then
         _hooked = true
     else
@@ -526,6 +485,9 @@ end
 
 installHook()
 resolveFromConfig()
+if validRemote(parryR) then
+    saveConfig()
+end
 
 -- public api
 function Probe.refreshRefs()
