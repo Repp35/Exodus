@@ -171,8 +171,6 @@ local function cacheRemote(r, mode)
     return r, mode
 end
 
--- Hook copiado EXATAMENTE do invisible hub (linhas 498-524). Sem filtro
--- extra, sem trusted flag — mesma lógica, mesmo comportamento.
 local function installHook()
     if _hooked then
         return true
@@ -323,9 +321,6 @@ function Probe.initParry()
 end
 
 function Probe.fireParry(flag)
-    -- Mesma lógica do original: tenta até 2 vezes, invalidando entre
-    -- as tentativas. Sem probe silencioso — confiando 100% no hook
-    -- do invisible pra já ter cacheado o remote certo.
     local function attempt()
         local r, m = resolveRemote()
         if not validRemote(r) then
@@ -361,7 +356,6 @@ function Probe.fireParry(flag)
     if attempt() then
         return true
     end
-    -- Falhou: invalida o remote cacheado e re-tenta UMA vez.
     Probe.invalidateRemote()
     return attempt()
 end
