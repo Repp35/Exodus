@@ -17,7 +17,7 @@ local _hooked = false
 local _oldNamecall, _oldIndex = nil, nil
 local _hookEnabled = true
 
-local DEFAULT_REMOTE_PATH = nil
+local DEFAULT_REMOTE_PATH = "ReplicatedStorage.Remotes"
 local DEFAULT_MODE = "buffer"
 
 local CONFIG_FOLDER = "PhantomLogic"
@@ -113,6 +113,18 @@ local function findInstanceByPath(path)
     if validRemote(cur) then
         return cur
     end
+    if cur and typeof(cur) == "Instance" then
+        for _, child in ipairs(cur:GetChildren()) do
+            if child.Name == "" and validRemote(child) then
+                return child
+            end
+        end
+        for _, child in ipairs(cur:GetChildren()) do
+            if validRemote(child) then
+                return child
+            end
+        end
+    end
     return nil
 end
 
@@ -206,7 +218,7 @@ local function cacheRemote(r, mode)
     parryR, parryMode = r, mode
     parryInit = false
     if changed then
-        saveConfig()
+        task.spawn(saveConfig)
     end
     return r, mode
 end
@@ -220,22 +232,17 @@ local function installHook()
     end
     local ok, err = pcall(function()
         _oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            if _hookEnabled and not checkcaller() then
-                local method = getnamecallmethod()
-                if method == "FireServer" or method == "fireServer" then
-                    if typeof(self) == "Instance" and self:IsA("RemoteEvent") then
-                        local args = { ... }
-                        local a1 = args[1]
-                        local t = typeof(a1)
-                        if t == "buffer" then
-                            cacheRemote(self, "buffer")
-                        elseif t == "string" then
-                            local ok2, found = pcall(string.find, a1, "\1", 1, true)
-                            if ok2 and found then
-                                cacheRemote(self, "buffer")
-                            end
-                        end
+            local method = getnamecallmethod()
+            local args = { ... }
+            if not checkcaller() and (method == "FireServer" or method == "fireServer") then
+                local isPayload = false
+                if args[1] then
+                    if typeof(args[1]) == "buffer" or (typeof(args[1]) == "string" and string.find(args[1], "\1")) then
+                        isPayload = true
                     end
+                end
+                if isPayload or self.Name == "RemoteEvent" then
+                    task.spawn(cacheRemote, self, "buffer")
                 end
             end
             return _oldNamecall(self, ...)
