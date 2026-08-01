@@ -1,165 +1,218 @@
---[[ Utils ]]
+--[[ utils ]]
 
+-- módulo
 local Utils = {}
+
+-- serviços
+local PlayersService = game:GetService("Players")
+local ReplicatedStorageService = game:GetService("ReplicatedStorage")
+local RunServiceService = game:GetService("RunService")
+local UserInputServiceService = game:GetService("UserInputService")
 
 -- meta
 local SCRIPT_VERSION = "22.1"
 local SCRIPT_NAME = "Phantom Ball LOGIC"
 
--- services
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Replicated = game:GetService("ReplicatedStorage")
-local UIS = game:GetService("UserInputService")
-
--- constants
-local now = os.clock
-local INF = math.huge
-local V3ZERO = Vector3.new(0, 0, 0)
-local DEFAULT_CPS = 4
-
--- state
-local State = {active = true, conns = {}, charConns = {}}
-
--- bootstrap
-function Utils.bootstrap(cfg)
-    cfg = cfg or {}
-    if type(_G.PhantomConfig) ~= "table" then
-        _G.PhantomConfig = {}
-    end
-    local seed = {
-        AutoParry = true,
-        ManualSpam = false,
-        AutoClash = true,
-        SpamRateMode = "CPF",
-        CPS = 4,
-        CustomCPS = false,
-        Keybind = Enum.KeyCode.F9,
-        SpamKeybind = Enum.KeyCode.F,
-        SpamMode = "Toggle"
-    }
-    for k, v in pairs(seed) do
-        if _G.PhantomConfig[k] == nil then
-            _G.PhantomConfig[k] = (cfg[k] ~= nil) and cfg[k] or v
-        end
-    end
-    _G.PhantomState = State
-    _G.PhantomManual = _G.PhantomManual == true
-    _G.PhantomAutoClash = _G.PhantomAutoClash ~= false
-    _G.PhantomModuleURLs = cfg.ModuleURLs or {}
-    return _G.PhantomConfig
-end
-
--- track
-function Utils.track(c)
-    if c and c.Disconnect then
-        State.conns[#State.conns + 1] = c
-    end
-    return c
-end
-
--- trackCharacter
-function Utils.trackCharacter(c)
-    if c and c.Disconnect then
-        State.charConns[#State.charConns + 1] = c
-    end
-    return c
-end
-
--- disconnectCharacterConnections
-function Utils.disconnectCharacterConnections()
-    for i = #State.charConns, 1, -1 do
-        local c = State.charConns[i]
-        State.charConns[i] = nil
-        if c then
-            pcall(c.Disconnect, c)
-        end
-    end
-end
-
--- CONFIG_KEYS
-local CONFIG_KEYS = {
-    "AutoParry",
-    "AutoClash",
-    "CPS",
-    "SpamRateMode",
-    "CustomCPS",
-    "Keybind",
-    "SpamKeybind",
-    "SpamMode"
+-- estado interno
+local State = {
+    active = false,
+    connections = {},
+    characterConnections = {},
+    config = {},
+    moduleURLs = {},
+    manualSpamActive = false,
+    guiLoaded = false,
+    guiSource = "",
+    diagnostics = {lastPush = 0}
 }
 
--- applyConfig
-function Utils.applyConfig(target)
-    local source = _G.PhantomConfig
-    if type(source) ~= "table" or type(target) ~= "table" then
-        return
-    end
-    for _, key in ipairs(CONFIG_KEYS) do
-        if source[key] ~= nil then
-            target[key] = source[key]
+-- callbacks
+local _onClashOn = nil
+local _onTarget = nil
+local _onTeleport = nil
+
+local function disconnectAll(connections)
+    for index = #connections, 1, -1 do
+        local connection = connections[index]
+        connections[index] = nil
+        if connection then
+            pcall(
+                function()
+                    connection:Disconnect()
+                end
+            )
         end
     end
-    target.CPS = math.clamp(tonumber(target.CPS) or DEFAULT_CPS, 1, 1000)
-    target.SpamRateMode = (target.SpamRateMode == "CPF") and "CPF" or "CPS"
-    target.SpamMode = (target.SpamMode == "Hold") and "Hold" or "Toggle"
 end
 
--- getters
+local function track(connections, connection)
+    if connection and type(connection.Disconnect) == "function" then
+        connections[#connections + 1] = connection
+    end
+    return connection
+end
+
+-- ciclo de vida
+function Utils.start()
+    State.active = true
+    return State
+end
+
+function Utils.stop()
+    State.active = false
+    disconnectAll(State.characterConnections)
+    disconnectAll(State.connections)
+    State.manualSpamActive = false
+    State.guiLoaded = false
+    State.guiSource = ""
+    State.diagnostics = {lastPush = 0}
+end
+
+function Utils.isActive()
+    return State.active
+end
+
+-- getters de estado
 function Utils.getState()
     return State
 end
+
+function Utils.getConfig()
+    return State.config
+end
+
+function Utils.getModuleURLs()
+    return State.moduleURLs
+end
+
+function Utils.isManualSpamActive()
+    return State.manualSpamActive
+end
+
+function Utils.isGUILoaded()
+    return State.guiLoaded
+end
+
+function Utils.getGUISource()
+    return State.guiSource
+end
+
+function Utils.getDiagnosticsState()
+    return State.diagnostics
+end
+
+-- setters de estado
+function Utils.setConfig(configTable)
+    for k, v in pairs(configTable) do
+        State.config[k] = v
+    end
+end
+
+function Utils.setModuleURLs(urlsTable)
+    for k, v in pairs(urlsTable) do
+        State.moduleURLs[k] = v
+    end
+end
+
+function Utils.setManualSpamActive(value)
+    State.manualSpamActive = value
+end
+
+function Utils.setGUILoaded(value)
+    State.guiLoaded = value
+end
+
+function Utils.setGUISource(source)
+    State.guiSource = source
+end
+
+function Utils.track(connection)
+    return track(State.connections, connection)
+end
+
+function Utils.trackCharacter(connection)
+    return track(State.characterConnections, connection)
+end
+
+function Utils.disconnectCharacterConnections()
+    disconnectAll(State.characterConnections)
+end
+
+-- serviços públicos
 function Utils.getPlayers()
-    return Players
+    return PlayersService
 end
+
+function Utils.getReplicatedStorage()
+    return ReplicatedStorageService
+end
+
 function Utils.getRunService()
-    return RunService
+    return RunServiceService
 end
-function Utils.getReplicated()
-    return Replicated
+
+function Utils.getUserInputService()
+    return UserInputServiceService
 end
-function Utils.getUIS()
-    return UIS
-end
+
 function Utils.getLocalPlayer()
-    return Players.LocalPlayer
+    return PlayersService.LocalPlayer
 end
+
+-- tempo
 function Utils.now()
-    return now
+    return os.clock()
 end
-function Utils.INF()
-    return INF
-end
-function Utils.V3ZERO()
-    return V3ZERO
-end
+
+-- meta
 function Utils.version()
     return SCRIPT_VERSION
 end
+
 function Utils.name()
     return SCRIPT_NAME
 end
+
 function Utils.defaultCps()
-    return DEFAULT_CPS
+    return 4
 end
 
--- stop
-local function stop()
-    State.active = false
-    Utils.disconnectCharacterConnections()
-    for i = #State.conns, 1, -1 do
-        local c = State.conns[i]
-        State.conns[i] = nil
-        if c then
-            pcall(c.Disconnect, c)
-        end
+function Utils.isClashActive()
+    if _onClashOn then
+        return _onClashOn()
     end
-    _G.PhantomManual = false
-    _G.__phantomGUI_loaded = nil
-    _G.__phantomGUI_src = nil
-    _G.PhantomDiag = nil
+    return false
 end
 
-_G.PhantomStop = stop
+function Utils.setOnClashOn(callback)
+    _onClashOn = callback
+end
+
+function Utils.onTarget(newTarget, t)
+    if _onTarget then
+        _onTarget(newTarget, t)
+    end
+end
+
+function Utils.setOnTarget(callback)
+    _onTarget = callback
+end
+
+function Utils.onTeleport()
+    if _onTeleport then
+        _onTeleport()
+    end
+end
+
+function Utils.setOnTeleport(callback)
+    _onTeleport = callback
+end
+
+-- expor stop globalmente
+_G.PhantomStop = Utils.stop
+
+if _G.ExodusModules then
+    _G.ExodusModules.Utils = Utils
+end
 
 return Utils
