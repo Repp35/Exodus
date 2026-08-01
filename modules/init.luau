@@ -115,12 +115,22 @@ function Init.start()
             local fn, err = loadstring(guiSource, "ExodusGUI")
             if fn then
                 Utils.setGUISource(guiSource)
-                local ok, err2 = pcall(fn)
+                local ok, result = pcall(fn)
                 if ok then
-                    Utils.setGUILoaded(true)
-                    print("[Exodus] Interface carregada com sucesso.")
+                    local PhantomUI = result or _G.ExodusModules.GUI
+                    if PhantomUI and type(PhantomUI.setup) == "function" then
+                        local ok2, err3 = pcall(PhantomUI.setup, {Utils = Utils})
+                        if ok2 then
+                            Utils.setGUILoaded(true)
+                            print("[Exodus] Interface inicializada com sucesso.")
+                        else
+                            warn("[Exodus] Erro ao inicializar GUI: " .. tostring(err3))
+                        end
+                    else
+                        warn("[Exodus] Módulo GUI carregado mas PhantomUI.setup não encontrado.")
+                    end
                 else
-                    warn("[Exodus] Erro ao executar GUI: " .. tostring(err2))
+                    warn("[Exodus] Erro ao executar script da GUI: " .. tostring(result))
                 end
             else
                 warn("[Exodus] Erro de sintaxe na GUI: " .. tostring(err))
