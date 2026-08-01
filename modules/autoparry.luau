@@ -1,9 +1,14 @@
---[[ AutoParry ]]
+--[[ autoparry.luau ]]
 
+-- módulo
 local AutoParry = {}
-local Probe, GameInfo, Utils
 
--- tunning
+-- dependências
+local Probe
+local GameInfo
+local Utils
+
+-- tunings
 local P = {
     FIRE_LOCK = 0.080,
     FIRE_TIMEOUT = 2.0,
@@ -33,7 +38,7 @@ local P = {
     GRACE_TIMEOUT = 0.30,
 }
 
--- AP
+-- estado AP
 local AP = {
     armed = false,
     fired = false,
@@ -45,7 +50,7 @@ local AP = {
     lastMissAt = 0,
 }
 
--- RES
+-- estado RES
 local RES = {
     stack = 0,
     lastFireBallRef = nil,
@@ -54,7 +59,7 @@ local RES = {
     lastStackAt = 0
 }
 
--- Sync
+-- estado Sync
 local Sync = {
     Speed = 0,
     RealPos = Vector3.new(0, 0, 0),
@@ -69,21 +74,20 @@ local Sync = {
     hasRealPos = false,
 }
 
--- locals
+-- variáveis locais
 local _teleportLockUntil = 0
 local _apBind = 0
-local _resolveCache = 0
-local _now = os.clock
 local _localUserId = -1
 local _onFired = nil
 local _lastTargetSeen = -999
+local _br = nil
+local _brTried = false
 
--- resRadiusBonus
+-- resiliência
 local function resRadiusBonus()
     return math.min(RES.stack * P.RES_PER_PARRY, P.RES_CAP)
 end
 
--- tickResilience
 local function tickResilience(t)
     if RES.stack <= 0 then
         return
@@ -106,36 +110,15 @@ local function tickResilience(t)
     end
 end
 
--- getDeflectCD (delegates to GameInfo, which auto-resolves the Deflect ability ref)
+-- cooldown de deflexão
 local function getDeflectCD()
-    if GameInfo and GameInfo.getDeflectCD then
-        local ok, v = pcall(GameInfo.getDeflectCD)
-        if ok and type(v) == "number" then return v end
-    end
-    return 0
+    return GameInfo.getDeflectCD()
 end
 
--- validRemote (mirror of v22.1 guard)
-local function _validRemote(r)
-    return typeof(r) == "Instance" and r.Parent ~= nil and r:IsA("RemoteEvent")
-end
-
--- sendParry (mirror of v22.1: re-resolve if invalid OR cache stale)
+-- disparo de parry
 local function sendParry()
-    local t = _now()
-    local r, m
-    if (not _validRemote(Probe.getRemote())) or (t - _resolveCache) > 3.0 then
-        r, m = Probe.resolveRemote()
-        _resolveCache = t
-    else
-        r, m = Probe.getRemote()
-    end
-    if not r then
-        return false
-    end
+    local t = Utils.now()
     if not Probe.fireParry(1) then
-        _resolveCache = 0
-        Probe.invalidate()
         return false
     end
     local b = GameInfo.getBall()
@@ -148,14 +131,12 @@ local function sendParry()
     return true
 end
 
--- tgtOn (4 fallbacks, mais rápido vence — estilo deltav3)
-local _br = nil
-local _brTried = false
+-- verificação de alvo
 local function _ensureBR()
     if _brTried then return _br end
     _brTried = true
     pcall(function()
-        local ts = game:GetService("ReplicatedStorage"):FindFirstChild("TS")
+        local ts = Utils.getReplicatedStorage():FindFirstChild("TS")
         if not ts then return end
         local brMod = ts:FindFirstChild("BallReplicator")
             and ts.BallReplicator:FindFirstChild("BallReplicator")
@@ -169,26 +150,28 @@ local function _ensureBR()
     return _br
 end
 
-local function tgtOn(ch)
-    if not ch or not ch.Parent then return false end
-    -- 1) Workspace attribute (replicado pelo servidor, fonte da verdade)
-    local ok, ws = pcall(function() return game:GetService("Workspace") end)
-    if ok and ws and ws:GetAttribute("GameBallTarget") == _localUserId then
+local function isTargetedByBall(character)
+    if not character or not character.Parent then return false end
+    local PlayersService = Utils.getPlayers()
+    local WorkspaceService = game:GetService("Workspace")
+
+    -- 1) Atributo do Workspace
+    if WorkspaceService:GetAttribute("GameBallTarget") == _localUserId then
         return true
     end
-    -- 2) BallReplicator.syncData (cache RAM, instantâneo)
+    -- 2) BallReplicator.syncData
     local br = _ensureBR()
     if br and br.syncData and br.syncData.HighlightTargetPlayerID == _localUserId then
         return true
     end
-    -- 3) Sync.Target (último recurso, derivado do server sync)
+    -- 3) Sync.Target
     if Sync and Sync.Target == _localUserId then
         return true
     end
     return false
 end
 
--- resetState
+-- reset de estado
 local function resetState()
     AP.armed, AP.fired, AP.firedAt = false, false, 0
     AP.inRangeEnterAt, AP.wasInRange = 0, false
@@ -210,58 +193,52 @@ local function resetState()
     Sync.forcedAt = 0
     Sync.hasRealPos = false
     _teleportLockUntil = 0
+    _lastTargetSeen = -999
 end
 
--- onBallSync
-local function onBallSync(d)
-    if typeof(d) ~= "table" then
+-- sincronização da bola
+local function onBallSync(data)
+    if typeof(data) ~= "table" then
         return
     end
-    local t = _now()
-    if type(d.Speed) == "number" then
-        Sync.Speed = d.Speed
+    local t = Utils.now()
+    if type(data.Speed) == "number" then
+        Sync.Speed = data.Speed
     end
-    if typeof(d.RealPosition) == "Vector3" then
-        Sync.RealPos = d.RealPosition
+    if typeof(data.RealPosition) == "Vector3" then
+        Sync.RealPos = data.RealPosition
         Sync.hasRealPos = true
     end
-    if typeof(d.DeflectDirection) == "Vector3" then
-        Sync.DeflectDir = d.DeflectDirection
+    if typeof(data.DeflectDirection) == "Vector3" then
+        Sync.DeflectDir = data.DeflectDirection
     end
-    if type(d.Grace) == "boolean" then
-        Sync.Grace = d.Grace
+    if type(data.Grace) == "boolean" then
+        Sync.Grace = data.Grace
     end
-    if type(d.ForceDirection) == "boolean" then
-        if d.ForceDirection and not Sync.ForceDir then
+    if type(data.ForceDirection) == "boolean" then
+        if data.ForceDirection and not Sync.ForceDir then
             Sync.forcedAt = t
         end
-        Sync.ForceDir = d.ForceDirection
+        Sync.ForceDir = data.ForceDirection
     end
-    if typeof(d.ForcedDirection) == "Vector3" then
-        Sync.ForcedDir = d.ForcedDirection
+    if typeof(data.ForcedDirection) == "Vector3" then
+        Sync.ForcedDir = data.ForcedDirection
     end
     Sync.lastSyncAt = t
-    if d.Teleported == true then
+    if data.Teleported == true then
         _teleportLockUntil = t + 0.20
         AP.fired = false
-        if _G.PhantomOnTeleport then
-            _G.PhantomOnTeleport()
-        end
+        -- _G.PhantomOnTeleport
         Sync.Teleported = true
         return
     end
     Sync.Teleported = false
-    GameInfo.applySync(d)
-    local newTarget = d.TargetPlayerID
-    if type(newTarget) == "number" then
-        Sync.Target = newTarget
-    else
+    GameInfo.applySync(data)
+    local newTarget = data.TargetPlayerID
+    if type(newTarget) ~= "number" then
         newTarget = -999
     end
-    -- FIX DOUBLE-CLICK (match v22.1): se o target NÃO mudou, não toca em AP.fired.
-    -- O reset de AP.fired só rola quando o target REALMENTE muda.
-    -- Regra: "bola foi minha → cliquei → bola parou de ser minha → só posso
-    -- clicar quando ela voltar a ser minha".
+
     if newTarget == _lastTargetSeen then
         Sync.Target = newTarget
         return
@@ -279,49 +256,47 @@ local function onBallSync(d)
     else
         AP.fired = false
     end
-    if d.Grace == false then
+    if data.Grace == false then
         Sync.Grace = false
-    elseif d.Grace == true then
+    elseif data.Grace == true then
         Sync.Grace = true
     end
-    if _G.PhantomOnTarget then
-        _G.PhantomOnTarget(newTarget, t)
-    end
+    -- _G.PhantomOnTarget
 end
 
--- bindParry
-local function bindParry(ch)
+-- bind de parry
+local function bindParry(character)
     _apBind = _apBind + 1
-    local id = _apBind
-    if not (ch and ch.Parent) then
+    local currentBindId = _apBind
+    if not (character and character.Parent) then
         return
     end
-    local hrp = ch:FindFirstChild("HumanoidRootPart") or ch:WaitForChild("HumanoidRootPart", 1)
-    if id ~= _apBind or not (hrp and hrp.Parent) then
+    local hrp = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 1)
+    if currentBindId ~= _apBind or not (hrp and hrp.Parent) then
         return
     end
     AP.fired, AP.armed = false, false
+
     -- heartbeat
     Utils.trackCharacter(
         Utils.getRunService().Heartbeat:Connect(
             function(dt)
-                if id ~= _apBind or not (ch.Parent and hrp.Parent) then
+                if currentBindId ~= _apBind or not (character.Parent and hrp.Parent) then
                     return
                 end
-                local Config = _G.PhantomConfig
+                local Config = Utils.getConfig()
                 if not Config or Config.AutoParry ~= true then
                     AP.fired = false
                     return
                 end
-                local t = _now()
-                -- Grace timeout PRIMEIRO: se Sync.Grace ficou stuck em true, limpa.
+                local t = Utils.now()
                 if Sync.Grace and (t - Sync.lastSyncAt) > P.GRACE_TIMEOUT then
                     Sync.Grace = false
                 end
                 if t < _teleportLockUntil or Sync.Grace then
                     return
                 end
-                if (_G.PhantomClashOn and _G.PhantomClashOn()) or _G.PhantomManual then
+                if Utils.isClashActive() or Utils.isManualSpamActive() then
                     return
                 end
                 tickResilience(t)
@@ -329,7 +304,7 @@ local function bindParry(ch)
                 if not (ball and ball.Parent) then
                     return
                 end
-                if tgtOn == nil or not tgtOn(ch) then
+                if not isTargetedByBall(character) then
                     AP.armed = false
                     return
                 end
@@ -387,25 +362,17 @@ local function bindParry(ch)
                     return
                 end
                 AP.wasInRange = true
-                -- >>> fonte da verdade: cooldown real da ability
-                -- O server reseta o cooldown em acerto (OnParried) e em dano.
-                -- Se errou: cooldown fica ativo (~2s).
-                -- Então: se realCD > 0, NÃO clica. Espera zerar.
                 local realCD = getDeflectCD()
                 if realCD > 0 then
                     return
                 end
-                -- lock curto anti-double-fire (mesmo tick)
-                -- OU timeout do cooldown do jogo (~2s) se getDeflectCD falhou
                 if AP.fired then
                     if (t - AP.firedAt) < P.FIRE_LOCK then
                         return
                     end
                     if (t - AP.firedAt) < P.FIRE_TIMEOUT then
-                        -- ainda dentro da janela do cooldown do jogo, espera
                         return
                     end
-                    -- passou tudo: libera (cooldown real já era pra ter zerado)
                     AP.fired = false
                     AP.lastMissAt = t
                 end
@@ -427,7 +394,7 @@ local function bindParry(ch)
     )
     -- ancestry
     Utils.trackCharacter(
-        ch.AncestryChanged:Connect(
+        character.AncestryChanged:Connect(
             function(_, parent)
                 if not parent then
                     _apBind = _apBind + 1
@@ -443,45 +410,53 @@ function AutoParry.setup(deps)
     GameInfo = deps.GameInfo
     Utils = deps.Utils
     _localUserId = Utils.getLocalPlayer().UserId
-    _G.PhantomResilience = RES
-    _G.PhantomApState = AP
-    _G.PhantomApSync = Sync
 end
 
--- public api
+-- api pública
 function AutoParry.setOnFired(fn)
     _onFired = fn
 end
+
 function AutoParry.fire()
     return sendParry()
 end
-function AutoParry.bindParry(ch)
-    bindParry(ch)
+
+function AutoParry.bindParry(character)
+    bindParry(character)
 end
+
 function AutoParry.resetState()
     resetState()
 end
-function AutoParry.onBallSync(d)
-    onBallSync(d)
+
+function AutoParry.onBallSync(data)
+    onBallSync(data)
 end
+
 function AutoParry.resRadiusBonus()
     return resRadiusBonus()
 end
+
 function AutoParry.getState()
     return AP
 end
+
 function AutoParry.getRes()
     return RES
 end
+
 function AutoParry.getSync()
     return Sync
 end
+
 function AutoParry.getLastFireBallRef()
     return RES.lastFireBallRef
 end
+
 function AutoParry.getLastFireBallAt()
     return RES.lastFireBallAt
 end
+
 function AutoParry.getP()
     return P
 end
