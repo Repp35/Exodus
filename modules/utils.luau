@@ -55,6 +55,15 @@ end
 -- ciclo de vida
 function Utils.start()
     State.active = true
+    -- Espelha o estado em _G.PhantomState pra módulos que checam via global
+    -- (ex.: probe lendo _G.PhantomState.active no resilience hook).
+    _G.PhantomState = State
+    if _G.PhantomManual == nil then _G.PhantomManual = false end
+    if _G.PhantomAutoClash == nil then _G.PhantomAutoClash = true end
+    if _G.PhantomClashOn == nil then _G.PhantomClashOn = function() return false end end
+    if _G.PhantomOnTarget == nil then _G.PhantomOnTarget = function() end end
+    if _G.PhantomOnTeleport == nil then _G.PhantomOnTeleport = function() end end
+    if _G.PhantomOnBurst == nil then _G.PhantomOnBurst = function() end end
     return State
 end
 
@@ -103,8 +112,26 @@ end
 
 -- setters de estado
 function Utils.setConfig(configTable)
+    if type(configTable) ~= "table" then return end
     for k, v in pairs(configTable) do
         State.config[k] = v
+    end
+    -- Espelha em _G.PhantomConfig pra qualquer módulo que leia via global
+    -- (autoClash/autoparry, init legacy, UI, etc).
+    if type(_G.PhantomConfig) ~= "table" then
+        _G.PhantomConfig = {}
+    end
+    for k, v in pairs(configTable) do
+        if k ~= "ModuleURLs" and k ~= "HttpFetch" then
+            _G.PhantomConfig[k] = v
+        end
+    end
+    State.moduleURLs = State.moduleURLs or {}
+    if type(configTable.ModuleURLs) == "table" then
+        for k, v in pairs(configTable.ModuleURLs) do
+            State.moduleURLs[k] = v
+        end
+        _G.PhantomModuleURLs = State.moduleURLs
     end
 end
 
