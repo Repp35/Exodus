@@ -7,6 +7,11 @@ local _buf1, _buf2 = nil, nil
 local _hooked = false
 local _oldNamecall = nil
 
+-- cooldown / dedup de persistência
+local _lastWriteAt = 0
+local _lastWriteKey = nil
+local WRITE_COOLDOWN = 0.25 -- máx 1 save a cada 250ms
+
 -- config
 local CONFIG_FOLDER = "PhantomLogic"
 local CONFIG_PATH = CONFIG_FOLDER .. "/probe_config.json"
@@ -68,83 +73,96 @@ end
 
 local function getServerFingerprint()
     local info = {}
-    pcall(
-        function()
-            info.placeId = game.PlaceId
-            info.jobId = game.JobId
-            info.universeId = game.GameId
-        end
-    )
+    pcall(function()
+        info.placeId = game.PlaceId
+        info.jobId = game.JobId
+        info.universeId = game.GameId
+    end)
     local Players = game:GetService("Players")
-    pcall(
-        function()
-            info.userId = Players.LocalPlayer and Players.LocalPlayer.UserId
+    pcall(function()
+        info.userId = Players.LocalPlayer and Players.LocalPlayer.UserId
+    end)
+    pcall(function()
+        local gs = game:GetService("GuiService")
+        if gs and type(gs.GetGameGenre) == "function" then
+            info.genre = gs:GetGameGenre()
         end
-    )
-    pcall(
-        function()
-            local gs = game:GetService("GuiService")
-            if gs and type(gs.GetGameGenre) == "function" then
-                info.genre = gs:GetGameGenre()
-            end
-        end
-    )
+    end)
     return info
 end
 
--- persist
+-- persist (com cooldown + dedup)
 local function saveConfig()
     if not (parryR and validRemote(parryR)) then
         return false
     end
-    local ok, http =
-        pcall(
-        function()
-            return game:GetService("HttpService")
-        end
-    )
+
+    local fullname
+    local okFn, _ = pcall(function() fullname = parryR:GetFullName() end)
+    if not okFn or type(fullname) ~= "string" then
+        return false
+    end
+
+    local fp = getServerFingerprint()
+    local key = tostring(fp.placeId) .. "|" .. tostring(fp.jobId) .. "|" .. fullname
+    local now = _now()
+
+    -- mesma key dentro do cooldown: dedup
+    if key == _lastWriteKey and (now - _lastWriteAt) < WRITE_COOLDOWN then
+        return true
+    end
+    -- qualquer write dentro do cooldown geral: skip
+    if (now - _lastWriteAt) < WRITE_COOLDOWN then
+        return true
+    end
+
+    local ok, http = pcall(function() return game:GetService("HttpService") end)
     if not ok or not http then
         return false
     end
+
     local cfg = {
         name = parryR.Name,
         path = getFullPath(parryR),
-        fullname = parryR:GetFullName(),
+        fullname = fullname,
         ancestry = getAncestry(parryR),
         mode = parryMode or "buffer",
-        server = getServerFingerprint(),
-        captured_at = os.time()
+        server = fp,
+        captured_at = os.time(),
     }
     local ok2, json = pcall(http.JSONEncode, http, cfg)
     if not ok2 then
         return false
     end
+
     local wrote = false
-    pcall(
-        function()
-            if type(makefolder) == "function" and type(isfolder) == "function" then
-                if not isfolder(CONFIG_FOLDER) then
-                    makefolder(CONFIG_FOLDER)
-                end
-                if not isfolder(HISTORY_FOLDER) then
-                    makefolder(HISTORY_FOLDER)
-                end
+    pcall(function()
+        if type(makefolder) == "function" and type(isfolder) == "function" then
+            if not isfolder(CONFIG_FOLDER) then
+                makefolder(CONFIG_FOLDER)
             end
-            if type(writefile) == "function" then
-                writefile(CONFIG_PATH, json)
-                wrote = true
-                local job = (cfg.server and cfg.server.jobId) or "unknown"
-                local jobShort = string.sub(job, 1, 8)
-                local safePath = (cfg.fullname or cfg.name or "remote"):gsub("%.", "_"):gsub("[^%w_%-]", "_")
-                if #safePath > 80 then
-                    safePath = string.sub(safePath, 1, 80)
-                end
-                local histName =
-                    HISTORY_PREFIX .. tostring(cfg.captured_at) .. "_" .. jobShort .. "_" .. safePath .. ".json"
-                writefile(HISTORY_FOLDER .. "/" .. histName, json)
+            if not isfolder(HISTORY_FOLDER) then
+                makefolder(HISTORY_FOLDER)
             end
         end
-    )
+        if type(writefile) == "function" then
+            writefile(CONFIG_PATH, json)
+            wrote = true
+            local job = (cfg.server and cfg.server.jobId) or "unknown"
+            local jobShort = string.sub(job, 1, 8)
+            local safePath = (cfg.fullname or cfg.name or "remote"):gsub("%.", "_"):gsub("[^%w_%-]", "_")
+            if #safePath > 80 then
+                safePath = string.sub(safePath, 1, 80)
+            end
+            local histName = HISTORY_PREFIX .. tostring(cfg.captured_at) .. "_" .. jobShort .. "_" .. safePath .. ".json"
+            writefile(HISTORY_FOLDER .. "/" .. histName, json)
+        end
+    end)
+
+    if wrote then
+        _lastWriteAt = now
+        _lastWriteKey = key
+    end
     return wrote
 end
 
@@ -170,67 +188,64 @@ local function installHook()
     if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" or type(checkcaller) ~= "function" then
         return false
     end
-    local ok =
-        pcall(
-        function()
-            _oldNamecall =
-                hookmetamethod(
-                game,
-                "__namecall",
-                function(self, ...)
-                    local method = getnamecallmethod()
-                    local args = {...}
-                    if not checkcaller() and (method == "FireServer" or method == "fireServer") then
-                        local isPayload = false
-                        if args[1] then
-                            if
-                                typeof(args[1]) == "buffer" or
-                                    (typeof(args[1]) == "string" and string.find(args[1], "\x01"))
-                             then
-                                isPayload = true
-                            end
+    local ok = pcall(function()
+        _oldNamecall = hookmetamethod(
+            game,
+            "__namecall",
+            function(self, ...)
+                local method = getnamecallmethod()
+                local args = {...}
+                if not checkcaller() and (method == "FireServer" or method == "fireServer") then
+                    local isPayload = false
+                    if args[1] then
+                        if
+                            typeof(args[1]) == "buffer" or
+                            (typeof(args[1]) == "string" and string.find(args[1], "\1"))
+                        then
+                            isPayload = true
                         end
-                        if isPayload or self.Name == "RemoteEvent" then
+                    end
+                    if isPayload or self.Name == "RemoteEvent" then
+                        if not validRemote(parryR) or parryR ~= self then
+                            parryR, parryMode, parryInit = self, "buffer", false
+                            _explicitlySet = true
+                            -- saveConfig() intencionalmente fora: save só na 1ª captura
+                        end
+                    end
+                end
+                return _oldNamecall(self, ...)
+            end
+        )
+
+        local _oldIndex = hookmetamethod(
+            game,
+            "__index",
+            function(self, key)
+                if
+                    not checkcaller() and (key == "FireServer" or key == "fireServer") and
+                    typeof(self) == "Instance" and
+                    self:IsA("RemoteEvent")
+                then
+                    if self.Name == "RemoteEvent" or (self.Parent and string.find(self.Parent.Name, "Remote")) then
+                        task.spawn(function()
                             if not validRemote(parryR) or parryR ~= self then
                                 parryR, parryMode, parryInit = self, "buffer", false
                                 _explicitlySet = true
-                                saveConfig()
+                                -- saveConfig() intencionalmente fora
                             end
-                        end
+                        end)
                     end
-                    return _oldNamecall(self, ...)
                 end
-            )
-
-            local _oldIndex =
-                hookmetamethod(
-                game,
-                "__index",
-                function(self, key)
-                    if
-                        not checkcaller() and (key == "FireServer" or key == "fireServer") and
-                            typeof(self) == "Instance" and
-                            self:IsA("RemoteEvent")
-                     then
-                        if self.Name == "RemoteEvent" or (self.Parent and string.find(self.Parent.Name, "Remote")) then
-                            task.spawn(
-                                function()
-                                    if not validRemote(parryR) or parryR ~= self then
-                                        parryR, parryMode, parryInit = self, "buffer", false
-                                        _explicitlySet = true
-                                        saveConfig()
-                                    end
-                                end
-                            )
-                        end
-                    end
-                    return _oldIndex(self, key)
-                end
-            )
-        end
-    )
+                return _oldIndex(self, key)
+            end
+        )
+    end)
     if ok then
         _hooked = true
+        -- snapshot inicial: grava uma vez quando o hook sobe
+        if validRemote(parryR) then
+            saveConfig()
+        end
     end
     return _hooked
 end
@@ -251,8 +266,7 @@ function Probe.setup(deps)
     resolveFromConfig()
 end
 
-function Probe.refreshRefs()
-end
+function Probe.refreshRefs() end
 
 function Probe.listHistory()
     local out = {}
@@ -355,12 +369,16 @@ function Probe.invalidateRemote()
     parryR, parryMode, parryInit = nil, nil, false
     _explicitlySet = false
     _lastLoadAt = 0
+    _lastWriteAt = 0
+    _lastWriteKey = nil
 end
 
 function Probe.invalidate()
     parryR, parryMode, parryInit = nil, nil, false
     _explicitlySet = false
     _lastLoadAt = 0
+    _lastWriteAt = 0
+    _lastWriteKey = nil
 end
 
 function Probe.probeNamed()
