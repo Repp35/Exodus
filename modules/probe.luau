@@ -166,6 +166,9 @@ local function cacheRemote(r, mode)
     parryR, parryMode = r, mode
     parryInit = false
     if changed then
+        -- Salva em disco. Próxima sessão carrega daqui e não precisa
+        -- de clique. Se o usuário clicar de novo num remote diferente,
+        -- esta mesma função detecta (changed=true) e atualiza.
         saveConfig()
     end
     return r, mode
@@ -212,6 +215,10 @@ local function installHook()
 end
 
 -- resolve
+-- Tenta usar o cache do disco PRIMEIRO. Se achar, usa e marca.
+-- Se não achar, deixa o fluxo normal (hook + click) descobrir.
+-- O `_resolvedOnce` aqui só evita re-checar o disco repetidamente
+-- dentro da MESMA sessão — não persiste entre execuções.
 local function resolveFromConfig()
     if _resolvedOnce and validRemote(parryR) then
         return parryR, parryMode
@@ -285,7 +292,12 @@ function Probe.setup(deps)
     Utils = deps.Utils
     _initBufs()
     installHook()
-    resolveRemote()
+    -- Tenta carregar do disco logo no setup. Se já tem cache, o usuário
+    -- não precisa clicar nesta sessão.
+    local r, m = resolveRemote()
+    if r then
+        print(("[probe] Remote carregado: %s (%s)"):format(getFullPath(r), tostring(m)))
+    end
 end
 
 -- api pública
@@ -366,11 +378,13 @@ end
 
 function Probe.invalidateRemote()
     parryR, parryMode, parryInit = nil, nil, false
+    _resolvedOnce = false
 end
 
 -- alias usado pelo init pra revalidar
 function Probe.invalidate()
     parryR, parryMode, parryInit = nil, nil, false
+    _resolvedOnce = false
 end
 
 -- alias usado pelo init pra varrer pools nomeados (did/RE_Deflect/Deflect)
