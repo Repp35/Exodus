@@ -237,26 +237,11 @@ function Probe.setRemote(r, mode)
 end
 
 local function installHook()
-    if _hooked then return true end
-    if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" or type(checkcaller) ~= "function" then
-        return false
-    end
-    local ok = pcall(function()
-        _oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod()
-            if not checkcaller() and (method == "FireServer" or method == "fireServer") then
-                if typeof(self) == "Instance" and self:IsA("RemoteEvent") then
-                    if not validRemote(parryR) or parryR ~= self then
-                        parryR, parryMode, parryInit = self, "buffer", false
-                        saveConfig()
-                    end
-                end
-            end
-            return _oldNamecall(self, ...)
-        end)
-    end)
-    if ok then _hooked = true end
-    return _hooked
+    -- Hook deliberadamente desligado. O remote SÓ é setado via
+    -- Probe.setRemote() (chamada explícita do clicker). Hook automático
+    -- capturava o primeiro FireServer de qualquer remote do jogo
+    -- (tipo Network.Network) e gravava no JSON, quebrando o autoparry.
+    return true
 end
 
 -- resolve: cache em memória primeiro, JSON segundo. Sem scan, sem probe.
