@@ -136,8 +136,10 @@ local function getServerFingerprint()
         info.userId = Players.LocalPlayer and Players.LocalPlayer.UserId
     end)
     pcall(function()
-        local gs = game:GetService("GuiService") or nil
-        info.genre = gs and gs:GetGameGenre and gs:GetGameGenre()
+        local gs = game:GetService("GuiService")
+        if gs and type(gs.GetGameGenre) == "function" then
+            info.genre = gs:GetGameGenre()
+        end
     end)
     return info
 end
