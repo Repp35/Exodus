@@ -1,5 +1,3 @@
---[[ auto clash ]]
-
 local AutoClash = {}
 
 local Probe
@@ -87,7 +85,6 @@ local S = {
     dashEvents          = {},
     dashPanicUntil      = 0,
     dashAnti            = { untilT = 0, src = nil, at = 0 },
-    lastMaintCheck      = 0,
 }
 
 local _localUserId = -1
@@ -142,10 +139,6 @@ local function tImpCapFor(spd, base, refSpd, lo, hi)
     if spd < 1 then return base end
     local scaled = (base * refSpd) / math.max(spd, 1)
     return math.clamp(scaled, lo, hi)
-end
-
-local function maintTimpMax(spd)
-    return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.06, 0.40)
 end
 
 local function deactTimpMax(spd)
@@ -265,7 +258,6 @@ local function _activateBurst(t)
     S.clashHoldUntil      = t + CLASH.BURST_ON_MS
     S.lastClashReact      = t
     S.clashOffAt          = 0
-    S.lastMaintCheck      = t
     
     local config = Utils.getConfig()
     local c = math.max(tonumber(config and config.CPS) or 25, 1)
@@ -279,29 +271,7 @@ local function _activateBurst(t)
     end
 end
 
--- Maintenance
-local function maintRadius(spd)
-    local p = requireP()
-    local defR = p and p.DEFLECT_R or 8.5
-    local base = math.max(defR + getParryBonus(), CLASH.MAINT_BALL_RADIUS)
-    return math.min(base, 55)
-end
-
-local function shouldMaintainClash()
-    if not S.clashOn then return false end
-    local t = Utils.now()
-    if (t - S.clashAt) < CLASH.MAINT_HOLD_MIN then return true end
-    local ctx = clashSnapshot()
-    if not ctx then return false end
-    if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return false end
-    if ctx.bDist <= maintRadius(ctx.spd) then return true end
-    if ctx.tImp > 0 and ctx.tImp <= maintTimpMax(ctx.spd) then return true end
-    if isTargeted() then return true end
-    if (t - S.lastFireAt) < CLASH.MAINT_PARRY_KEEP then return true end
-    if (t - S.lastTargetAt) < CLASH.MAINT_TARGET_KEEP then return true end
-    return false
-end
-
+-- Deactivation (Padrão Exato V22.1)
 local function isBallApproaching(hrp, ball)
     local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
     if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return true end
@@ -338,14 +308,6 @@ local function shouldDeactivateClash()
     end
     if ctx.spd < 1 and ctx.bDist > 20 then return true end
     return false
-end
-
-local function tickMaintenance()
-    if not S.clashOn then return end
-    local t = Utils.now()
-    if (t - S.lastMaintCheck) < CLASH.MAINT_CHECK_INTERVAL then return end
-    S.lastMaintCheck = t
-    if not shouldMaintainClash() then clearClash() end
 end
 
 -- Evaluation
@@ -559,10 +521,6 @@ function AutoClash.evaluate(t, hr, ball, config)
     evaluateClash(t, hr, ball, config)
 end
 
-function AutoClash.tickMaintenance()
-    tickMaintenance()
-end
-
 function AutoClash.updateDashTrack(t)
     updateDashTrack(t)
 end
@@ -593,7 +551,7 @@ end
 
 function AutoClash.resetState()
     S.clashOn, S.clashAt, S.clashHoldUntil, S.clashOffAt, S.lastClashReact = false, 0, 0, 0, 0
-    S.targetRingIdx, S.targetCps, S.lastMaintCheck = 0, 0, 0
+    S.targetRingIdx, S.targetCps = 0, 0
     S.lastTargetAt, S.lastFireAt, S.teleportLockUntil = 0, 0, 0
     for i = 1, RING_BUF do S.targetRing[i] = 0 end
     table.clear(S.dashEvents)
