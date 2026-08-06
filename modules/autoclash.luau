@@ -57,11 +57,11 @@ local CLASH = {
     DEACT_RETURN_FACTOR      = 4.0,
     DEACT_RETURN_FLOOR       = 0.250,
     DEACT_HOLD_OFF_MS        = 0.150,
-    FLOW_PROTECT_MS          = 0.150,
+    FLOW_PROTECT_MS          = 0.220,
 
     MAINT_EMA_UP             = 0.6,
-    MAINT_EMA_DOWN           = 0.10,
-    MAINT_FLOOR              = 0.30,
+    MAINT_EMA_DOWN           = 0.04,
+    MAINT_FLOOR              = 0.20,
 
     PANIC_CD_RADIUS          = 0.180,
     PANIC_CD_TARGET          = 0.140,
@@ -266,10 +266,15 @@ local function tickReturnDetector(t, hr, ball)
         end
     elseif S.detPhase == "EXITED" then
         local limiar = S.detEntryTime * CLASH.DET_RETURN_FACTOR
-        if (isInside and not S.detWasInside) or dotComing then
-            if limiar > 0 and (t - S.detExitAt) <= limiar and dotComing then
+        if isInside and not S.detWasInside then
+            if limiar > 0 and (t - S.detExitAt) <= limiar then
                 S.detSignal = true
             end
+            local entryTime = dist > 0.1 and (dist / spd) or 0.01
+            S.detPhase     = "INSIDE"
+            S.detEnterAt   = t
+            S.detEntryTime = entryTime
+        elseif dotComing then
             local entryTime = dist > 0.1 and (dist / spd) or 0.01
             S.detPhase     = "INSIDE"
             S.detEnterAt   = t
@@ -483,11 +488,11 @@ local function evaluateClash(t, hr, ball, config)
     tickReturnDetector(t, hr, ball)
 
     if S.lastClashOffAt > 0 and (t - S.lastClashOffAt) < CLASH.CLASH_REACTIVATE_CD then
+        if not S.clashOn then return end
         if S.clashOn and shouldDeactivateClash(t, clashSnapshot()) then
             clearClash()
             S.burstState, S.burstSignalDuringOn = "IDLE", false
         end
-        return
     end
 
     local ctx = clashSnapshot()
@@ -525,6 +530,7 @@ local function evaluateClash(t, hr, ball, config)
             elseif S.burstState == "OFF" then
                 if (t - S.burstOffStart) >= CLASH.BURST_OFF_MS then
                     S.burstState = "IDLE"
+                    S.clashHoldUntil = math.max(S.clashHoldUntil, t + CLASH.HOLD)
                 end
             end
             return
