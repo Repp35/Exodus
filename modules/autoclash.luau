@@ -307,9 +307,11 @@ local function evaluateClash(t, hr, ball, config)
     local antiDashActive = S.dashAnti.untilT > t
     local panicActive    = S.dashPanicUntil > t
     local targeted       = ctx and ctx.targeted or isTargeted()
-    local inRange        = ctx and ctx.bDist <= 22 or false
+    
+    local antiDashGate = antiDashActive and targeted
+    local panicGate    = panicActive and targeted
 
-    local canFire = (S.detSignal and targeted) or antiDashActive or panicActive or (inRange and targeted)
+    local canFire = (S.detSignal and targeted) or antiDashGate or panicGate
 
     if S.burstState == "IDLE" then
         if canFire then _activateBurst(t) end
