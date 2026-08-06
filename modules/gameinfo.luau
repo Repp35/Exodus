@@ -201,24 +201,33 @@ local function nearestPlayerAlive()
         return _nearestDist, _nearestAlive
     end
     _lastNearest = t
+    
     local lp = Players.LocalPlayer
-    local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-    if not (myHRP and myHRP.Parent) then
+    local char = lp.Character
+    local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+    if not myHRP then
         _nearestDist, _nearestAlive = math.huge, false
         return _nearestDist, _nearestAlive
     end
+    
     local myPos = myHRP.Position
     local curDist, curAlive = math.huge, false
-    for _, p in Players:GetPlayers() do
+    
+    local allPlayers = Players:GetPlayers()
+    for i = 1, #allPlayers do
+        local p = allPlayers[i]
         if p ~= lp then
-            local ch = p.Character
-            local php = ch and ch:FindFirstChild("HumanoidRootPart")
-            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-            local alive = php and php.Parent and hum and hum.Parent and hum.Health > 0
-            if alive then
-                local d = (myPos - php.Position).Magnitude
-                if d < curDist then
-                    curDist, curAlive = d, true
+            local pChar = p.Character
+            if pChar then
+                local php = pChar:FindFirstChild("HumanoidRootPart")
+                if php then
+                    local hum = pChar:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        local d = (myPos - php.Position).Magnitude
+                        if d < curDist then
+                            curDist, curAlive = d, true
+                        end
+                    end
                 end
             end
         end
@@ -264,18 +273,17 @@ local function liveTImp()
     if (n - _liveTImpCache.at) < LIVE_TIMP_TTL then
         return _liveTImpCache
     end
+    
     local lp = Players.LocalPlayer
-    local hr = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    local char = lp.Character
+    local hr = char and char:FindFirstChild("HumanoidRootPart")
     local ball = getBall()
-    if hr and hr.Parent and ball and ball.Parent then
+    
+    if hr and ball and ball.Parent then
         local bp = ball.Position
-        local ok, av =
-            pcall(
-            function()
-                return ball.AssemblyLinearVelocity
-            end
-        )
-        local spd = (ok and typeof(av) == "Vector3") and av.Magnitude or 0
+        local av = ball.AssemblyLinearVelocity
+        local spd = av.Magnitude
+        
         if spd < 1 then
             _liveTImpCache = {tImp = math.huge, bp = bp, spd = 0, at = n}
         else
