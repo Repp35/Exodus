@@ -4,15 +4,80 @@ _G.ExodusModules = _G.ExodusModules or {}
 
 local Init = {}
 
+local REPO = "Repp35/Exodus"
+local BRANCH = "main"
+local BASE_URL = "https://raw.githubusercontent.com/" .. REPO .. "/"
+
 local ModuleURLs = {
-    Utils = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/utils.luau",
-    GameInfo = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/gameinfo.luau",
-    Probe = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/probe.luau",
-    AutoParry = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/autoparry.luau",
-    AutoClash = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/autoclash.luau",
-    Spam = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/modules/spam.luau",
-    GUI = "https://raw.githubusercontent.com/Repp35/Exodus/refs/heads/main/ui-2.luau"
+    Utils = BASE_URL .. BRANCH .. "/modules/utils.luau",
+    GameInfo = BASE_URL .. BRANCH .. "/modules/gameinfo.luau",
+    Probe = BASE_URL .. BRANCH .. "/modules/probe.luau",
+    AutoParry = BASE_URL .. BRANCH .. "/modules/autoparry.luau",
+    AutoClash = BASE_URL .. BRANCH .. "/modules/autoclash.luau",
+    Spam = BASE_URL .. BRANCH .. "/modules/spam.luau",
+    GUI = BASE_URL .. BRANCH .. "/ui-2.luau"
 }
+
+local function getLatestSHA()
+    -- Adicionamos um timestamp para evitar que a própria chamada da API seja cacheada por proxies
+    local apiURL = "https://api.github.com/repos/" .. REPO .. "/commits/" .. BRANCH .. "?t=" .. os.time()
+    
+    local success, result = pcall(function()
+        local body
+        local httpService = game:GetService("HttpService")
+        
+        -- Headers para evitar bloqueios da API do GitHub (User-Agent é obrigatório)
+        local headers = {
+            ["User-Agent"] = "Exodus-Loader/1.0",
+            ["Cache-Control"] = "no-cache"
+        }
+
+        if type(_G.request) == "function" then
+            local r = _G.request({
+                Url = apiURL, 
+                Method = "GET",
+                Headers = headers
+            })
+            if r and r.StatusCode == 200 then
+                body = r.Body
+            end
+        elseif type(game.HttpGet) == "function" then
+            -- Alguns executores não permitem passar headers no HttpGet, então tentamos direto
+            body = game:HttpGet(apiURL)
+        end
+        
+        if body then
+            local data = httpService:JSONDecode(body)
+            return data and data.sha
+        end
+    end)
+    
+    return success and result or nil
+end
+
+local function updateURLs()
+    local sha = getLatestSHA()
+    local versionIdentifier
+    
+    if sha then
+        print("[Exodus] SHA obtido com sucesso: " .. sha:sub(1, 7))
+        versionIdentifier = sha
+    else
+        warn("[Exodus] Falha ao obter SHA, usando branch main (pode haver cache de 5 min)")
+        versionIdentifier = "refs/heads/" .. BRANCH
+    end
+    
+    -- Reconstrói as URLs garantindo o formato correto para SHA ou Branch
+    ModuleURLs.Utils = BASE_URL .. versionIdentifier .. "/modules/utils.luau"
+    ModuleURLs.GameInfo = BASE_URL .. versionIdentifier .. "/modules/gameinfo.luau"
+    ModuleURLs.Probe = BASE_URL .. versionIdentifier .. "/modules/probe.luau"
+    ModuleURLs.AutoParry = BASE_URL .. versionIdentifier .. "/modules/autoparry.luau"
+    ModuleURLs.AutoClash = BASE_URL .. versionIdentifier .. "/modules/autoclash.luau"
+    ModuleURLs.Spam = BASE_URL .. versionIdentifier .. "/modules/spam.luau"
+    ModuleURLs.GUI = BASE_URL .. versionIdentifier .. "/ui-2.luau"
+end
+
+updateURLs()
 
 local CONFIG = {
     AutoParry = true,
