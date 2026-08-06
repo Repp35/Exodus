@@ -1,5 +1,5 @@
 --[[
-    AutoClash Module
+    AutoClash Module - Phantom Ball Logic
 ]]--
 
 local AutoClash = {}
@@ -53,7 +53,6 @@ local CLASH = {
     MIN_HOLD                 = 0.050,
     DEACT_TIMP_THRESH        = 0.25,
     DEACT_TIMP_SUSTAIN       = 0.15,
-    ACT_TIMP_THRESH          = 0.22,  -- Limiar de tImp para ativação precisa
 }
 
 local RING_BUF = 8
@@ -308,10 +307,9 @@ local function evaluateClash(t, hr, ball, config)
     local antiDashActive = S.dashAnti.untilT > t
     local panicActive    = S.dashPanicUntil > t
     local targeted       = ctx and ctx.targeted or isTargeted()
-    
-    -- Ativação baseada em tImp e detSignal, evitando ativação cega por distância
-    local timpValid      = ctx and ctx.tImp > 0 and ctx.tImp <= CLASH.ACT_TIMP_THRESH or false
-    local canFire        = (S.detSignal and targeted) or antiDashActive or panicActive or (timpValid and targeted)
+    local inRange        = ctx and ctx.bDist <= 22 or false
+
+    local canFire = (S.detSignal and targeted) or antiDashActive or panicActive or (inRange and targeted)
 
     if S.burstState == "IDLE" then
         if canFire then _activateBurst(t) end
@@ -550,6 +548,10 @@ end
 
 function AutoClash.setTeleportLock(t)
     S.teleportLockUntil = t + 0.20
+end
+
+function AutoClash.coreRecordFire(t)
+    S.lastFireAt = t
 end
 
 function AutoClash.recordFire(t)
