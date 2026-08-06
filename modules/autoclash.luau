@@ -141,10 +141,11 @@ end
 
 local function updateTargetCps(t)
     local winStart = t - CLASH.CPS_WIN
+    local freshThresh = t - CLASH.RING_FRESH_MAX
     local cnt = 0
     for i = 1, RING_BUF do
         local ts = S.targetRing[i]
-        if ts and ts >= winStart and ts >= t - CLASH.RING_FRESH_MAX then
+        if ts > winStart and ts > freshThresh then
             cnt = cnt + 1
         end
     end
@@ -285,33 +286,42 @@ local function clashSnapshot()
     if _ctxCache.valid and (t - _ctxCache.t) < CLASH_SNAPSHOT_TTL then
         return _ctxCache
     end
+    
     local hr = getMyHRP()
-    if not (hr and hr.Parent) then
+    if not hr then
         _ctxCache.valid = false
         return nil
     end
-    updateTargetCps(t)
+    
     local ball = getBall()
     if not (ball and ball.Parent) then
         _ctxCache.valid = false
         return nil
     end
+    
+    updateTargetCps(t)
+    
     local nearest, nearestAlive = GameInfo.nearestPlayerAlive()
     local bp = ball.Position
-    local bDist = (hr.Position - bp).Magnitude
+    local hrpPos = hr.Position
+    local bDist = (hrpPos - bp).Magnitude
     local panic = nearestAlive and (nearest <= 9 and bDist <= 13)
+    
     local tImp, spd = 0, 0
     local live = GameInfo.liveTImp()
     if live then
-        tImp, spd = live.tImp or 0, live.spd or 0
+        tImp, spd = live.tImp, live.spd
     end
+    
     if spd < 1 then
         local ti, _, s2 = GameInfo.computeTImp(hr, ball, t)
         tImp, spd = ti, s2
     end
+    
     local rad      = effectiveRadius(spd)
     local maintRad = maintenanceRadius(spd)
     local panicR   = rad * 0.5
+    
     _ctxCache.t, _ctxCache.valid = t, true
     _ctxCache.hr = hr
     _ctxCache.ball, _ctxCache.bp = ball, bp
@@ -322,6 +332,7 @@ local function clashSnapshot()
     _ctxCache.maintRad = maintRad
     _ctxCache.panicR   = panicR
     _ctxCache.targeted = isTargeted()
+    
     return _ctxCache
 end
 
@@ -577,64 +588,52 @@ end
 local function updateDashTrack(t)
     if (t - _lastDashTrack) < CLASH.DASH_TRACK_INTERVAL then return end
     _lastDashTrack = t
+    
     local lp = Utils.getLocalPlayer()
-    local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-    if not (myHRP and myHRP.Parent) then
+    local char = lp.Character
+    local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+    if not myHRP then
         table.clear(S.dashEvents)
         return
     end
+    
     local myPos = myHRP.Position
-    local fullScan = (t - _lastFullPlayerScan) >= CLASH.FULL_PLAYER_SCAN_INTERVAL
-    local playersToCheck = {}
     local PlayersService = Utils.getPlayers()
-    if fullScan then
-        _lastFullPlayerScan = t
-        for _, p in PlayersService:GetPlayers() do
-            if p ~= lp then table.insert(playersToCheck, p) end
+    local allPlayers = PlayersService:GetPlayers()
+    
+    for i = 1, #allPlayers do
+        local p = allPlayers[i]
+        if p == lp then continue end
+        
+        local pChar = p.Character
+        if not pChar then 
+            S.dashEvents[p.UserId] = nil
+            continue 
         end
-    else
-        local seen = {}
-        for _, p in PlayersService:GetPlayers() do
-            if p == lp then continue end
-            seen[p.UserId] = true
-            if S.dashEvents[p.UserId] then
-                table.insert(playersToCheck, p)
-            else
-                local ch = p.Character
-                local php = ch and ch:FindFirstChild("HumanoidRootPart")
-                if php and php.Parent and (myPos - php.Position).Magnitude <= CLASH.PLAYER_SCAN_RADIUS then
-                    table.insert(playersToCheck, p)
-                end
-            end
-        end
-        for uid in pairs(S.dashEvents) do
-            if not seen[uid] then
-                local p = PlayersService:GetPlayerByUserId(uid)
-                if p then table.insert(playersToCheck, p) end
-            end
-        end
-    end
-    local processed = {}
-    for _, p in ipairs(playersToCheck) do
-        if processed[p.UserId] then continue end
-        processed[p.UserId] = true
-        local ch = p.Character
-        local php = ch and ch:FindFirstChild("HumanoidRootPart")
-        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-        local alive = php and php.Parent and hum and hum.Parent and hum.Health > 0
-        if not alive then
+        
+        local php = pChar:FindFirstChild("HumanoidRootPart")
+        if not php then
             S.dashEvents[p.UserId] = nil
             continue
         end
-        local ok, av = pcall(function() return php.AssemblyLinearVelocity end)
-        if not (ok and typeof(av) == "Vector3") then
+        
+        local dist = (myPos - php.Position).Magnitude
+        if dist > CLASH.PLAYER_SCAN_RADIUS and not S.dashEvents[p.UserId] then
+            continue
+        end
+        
+        local hum = pChar:FindFirstChildOfClass("Humanoid")
+        if not (hum and hum.Health > 0) then
             S.dashEvents[p.UserId] = nil
             continue
         end
+        
+        local av = php.AssemblyLinearVelocity
         local spd = av.Magnitude
         local ev = S.dashEvents[p.UserId]
+        
         if spd >= CLASH.DASH_SPD_THRESH then
-            local dir = spd > 0.1 and av.Unit or nil
+            local dir = av.Unit
             if not ev then
                 S.dashEvents[p.UserId] = { spd = spd, dir = dir, at = t, startedAt = t, confirmed = false }
             else
@@ -649,30 +648,32 @@ local function updateDashTrack(t)
             S.dashEvents[p.UserId] = nil
         end
     end
-    for uid in pairs(S.dashEvents) do
-        if not processed[uid] then S.dashEvents[uid] = nil end
-    end
+    
+    -- Cleanup events for players no longer in game
     for uid, ev in pairs(S.dashEvents) do
-        if not (ev and ev.confirmed and ev.dir and ev.spd) then continue end
-        local dur = ev.at - ev.startedAt
+        local p = PlayersService:GetPlayerByUserId(uid)
+        if not p or not ev.confirmed or not ev.dir then
+            if not p then S.dashEvents[uid] = nil end
+            continue
+        end
+        
+        local dur = t - ev.startedAt
         if dur > CLASH.DASH_DUR_MAX then
             S.dashEvents[uid] = nil
             continue
         end
-        local pl = PlayersService:GetPlayerByUserId(uid)
-        local php = pl and pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
-        if not (php and php.Parent) then
-            S.dashEvents[uid] = nil
-        elseif dur >= CLASH.DASH_DUR_MIN then
-            local toMe = myPos - php.Position
-            local dist = toMe.Magnitude
-            if dist > 0.1 and dist <= CLASH.DASH_PANIC_DIST then
-                local dot = ev.dir:Dot(toMe.Unit)
-                if dot >= CLASH.DASH_PANIC_DOT and ev.spd >= CLASH.DASH_SPD_CONFIRM then
-                    S.dashPanicUntil = math.max(S.dashPanicUntil, t + CLASH.DASH_PANIC_WINDOW)
-                    local src = PlayersService:GetPlayerByUserId(uid)
-                    if src then
-                        S.dashAnti.src    = src
+        
+        if dur >= CLASH.DASH_DUR_MIN then
+            local pChar = p.Character
+            local php = pChar and pChar:FindFirstChild("HumanoidRootPart")
+            if php then
+                local toMe = myPos - php.Position
+                local dist = toMe.Magnitude
+                if dist <= CLASH.DASH_PANIC_DIST then
+                    local dot = ev.dir:Dot(toMe.Unit)
+                    if dot >= CLASH.DASH_PANIC_DOT and ev.spd >= CLASH.DASH_SPD_CONFIRM then
+                        S.dashPanicUntil = math.max(S.dashPanicUntil, t + CLASH.DASH_PANIC_WINDOW)
+                        S.dashAnti.src    = p
                         S.dashAnti.untilT = math.max(S.dashAnti.untilT, t + CLASH.ANTIDASH_PANIC_HOLD)
                     end
                 end
