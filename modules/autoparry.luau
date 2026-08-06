@@ -151,20 +151,24 @@ local function _ensureBR()
 end
 
 local function isTargetedByBall(character)
-    if not character or not character.Parent then return false end
-    local PlayersService = Utils.getPlayers()
-    local WorkspaceService = game:GetService("Workspace")
-
-    if WorkspaceService:GetAttribute("GameBallTarget") == _localUserId then
+    if not character then return false end
+    
+    if game:GetAttribute("GameBallTarget") == _localUserId then
         return true
     end
+    
     local br = _ensureBR()
-    if br and br.syncData and br.syncData.HighlightTargetPlayerID == _localUserId then
+    if br then
+        local syncData = br.syncData
+        if syncData and syncData.HighlightTargetPlayerID == _localUserId then
+            return true
+        end
+    end
+    
+    if Sync.Target == _localUserId then
         return true
     end
-    if Sync and Sync.Target == _localUserId then
-        return true
-    end
+    
     return false
 end
 
@@ -308,29 +312,24 @@ local function bindParry(character)
                 if syncFresh and Sync.Speed > 0 then
                     spd = Sync.Speed
                 else
-                    local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-                    spd = (ok and typeof(av) == "Vector3") and av.Magnitude or 0
+                    spd = ball.AssemblyLinearVelocity.Magnitude
                 end
+                
                 if spd < P.MIN_SPD then
                     return
                 end
+                
                 local bp
                 if syncFresh and Sync.hasRealPos then
                     local pingSec = GameInfo.pingOneWay()
                     if spd > 1 and pingSec > 0 then
                         local dir = Sync.DeflectDir
-                        if dir and dir.Magnitude > 0.01 then
-                            dir = dir.Unit
-                        else
-                            local ok2, av = pcall(function() return ball.AssemblyLinearVelocity end)
-                            if ok2 and typeof(av) == "Vector3" and av.Magnitude > 0.1 then
-                                dir = av.Unit
-                            else
-                                dir = nil
-                            end
+                        if not (dir and dir.Magnitude > 0.01) then
+                            dir = ball.AssemblyLinearVelocity
                         end
-                        if dir then
-                            bp = Sync.RealPos + dir * (spd * pingSec)
+                        
+                        if dir and dir.Magnitude > 0.1 then
+                            bp = Sync.RealPos + dir.Unit * (spd * pingSec)
                         else
                             bp = Sync.RealPos
                         end
