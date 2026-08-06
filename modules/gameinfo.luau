@@ -170,8 +170,8 @@ local function nearestPlayerAlive()
 		return _nearestDist, _nearestAlive
 	end
 	_lastNearest = t
-	local lp = Players.LocalPlayer
-	local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	local lp = Players and Players.LocalPlayer
+	local myHRP = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
 	if not myHRP then
 		_nearestDist, _nearestAlive = math.huge, false
 		return _nearestDist, _nearestAlive
@@ -195,10 +195,11 @@ end
 
 -- sincronização
 local function isTargeted(lastTarget)
-	local lp = Players.LocalPlayer
-	return _sync.Target == lp.UserId
-		or lastTarget == lp.UserId
-		or Workspace:GetAttribute("GameBallTarget") == lp.UserId
+	local lp = Players and Players.LocalPlayer
+	local lpId = lp and lp.UserId or -1
+	return _sync.Target == lpId
+		or lastTarget == lpId
+		or Workspace:GetAttribute("GameBallTarget") == lpId
 end
 
 local function applySync(d)
@@ -264,7 +265,7 @@ end
 
 -- watcher
 local function installBallWatcher(trackFn)
-	local gameFolder = Workspace:WaitForChild("Game", 30)
+	local gameFolder = Workspace and Workspace:WaitForChild("Game", 30)
 	local ballWatcher = gameFolder and gameFolder:FindFirstChild("Ball")
 	if ballWatcher then
 		trackFn(ballWatcher.ChildAdded:Connect(function(c)
@@ -283,7 +284,9 @@ end
 -- setup
 function GameInfo.setup(u)
 	Utils = u
-	Players, Stats, Workspace = Utils.getPlayers(), game:GetService("Stats"), game:GetService("Workspace")
+	Players = (Utils and type(Utils.getPlayers) == "function") and Utils.getPlayers() or game:GetService("Players")
+	Stats = game:GetService("Stats")
+	Workspace = game:GetService("Workspace")
 end
 
 -- api
@@ -352,8 +355,9 @@ function GameInfo.liveTImp()
 	if (n - _liveTImpCache.at) < LIVE_TIMP_TTL then
 		return _liveTImpCache
 	end
-	local lp, ball = Players.LocalPlayer, getBall()
-	local hr = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	local lp = Players and Players.LocalPlayer
+	local ball = getBall()
+	local hr = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
 	if hr and ball and ball.Parent then
 		local bp, av = ball.Position, ball.AssemblyLinearVelocity
 		local spd = av.Magnitude
