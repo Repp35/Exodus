@@ -224,26 +224,30 @@ function Init.start()
             end))
         end
 
+        local runService = Utils.getRunService()
+        local config = getConfig()
+        
         Utils.trackCharacter(
-            Utils.getRunService().Heartbeat:Connect(function(dt)
+            runService.Heartbeat:Connect(function(dt)
                 if dead or not Utils.isActive() then return end
                 if not (ch.Parent and hrp.Parent) then dead = true return end
-                local t = Utils.now()
-                local ball = GameInfo and GameInfo.getBall and GameInfo.getBall()
-                if AutoClash and AutoClash.updateDashTrack then
-                    pcall(AutoClash.updateDashTrack, t)
+                
+                local t = os.clock()
+                local ball = GameInfo.getBall()
+                
+                -- Otimizado: chamadas diretas sem pcall excessivo no hot path
+                if AutoClash then
+                    AutoClash.updateDashTrack(t)
+                    AutoClash.evaluate(t, hrp, ball, config)
+                    AutoClash.invalidateSnapshot()
                 end
-                if AutoClash and AutoClash.evaluate then
-                    pcall(AutoClash.evaluate, t, hrp, ball, getConfig())
+                
+                if Spam then
+                    Spam.tick(dt)
                 end
-                if AutoClash and AutoClash.invalidateSnapshot then
-                    pcall(AutoClash.invalidateSnapshot)
-                end
-                if Spam and Spam.tick then
-                    pcall(Spam.tick, dt)
-                end
-                if GameInfo and GameInfo.sampleFrameDelta then
-                    pcall(GameInfo.sampleFrameDelta, dt)
+                
+                if GameInfo then
+                    GameInfo.sampleFrameDelta(dt)
                 end
             end)
         )
