@@ -1,3 +1,7 @@
+--[[
+    AutoClash Module
+]]--
+
 local AutoClash = {}
 
 local Probe
@@ -6,7 +10,6 @@ local Utils
 local AutoParry
 local P = nil
 
--- Tunings
 local CLASH = {
     BALL_HARD_CAP            = 22,
     HOLD                     = 0.20,
@@ -27,6 +30,8 @@ local CLASH = {
     OFF_FAST                 = 0.050,
     T_IMP_CAP_BASE           = 0.090,
     T_IMP_CAP_FLOOR          = 0.050,
+    PANIC_DIST               = 9,
+    PANIC_BALL               = 13,
     DASH_SPD_THRESH          = 50,
     DASH_SPD_CONFIRM         = 62,
     DASH_SPD_RELEASE         = 35,
@@ -48,11 +53,11 @@ local CLASH = {
     MIN_HOLD                 = 0.050,
     DEACT_TIMP_THRESH        = 0.25,
     DEACT_TIMP_SUSTAIN       = 0.15,
+    ACT_TIMP_THRESH          = 0.22,  -- Limiar de tImp para ativação precisa
 }
 
 local RING_BUF = 8
 
--- State
 local S = {
     lastTarget          = -999,
     lastTargetAt        = 0,
@@ -90,7 +95,6 @@ local _ctxCache = { t = 0, valid = false }
 local CLASH_SNAPSHOT_TTL = 0.05
 local _spamDebt = 0
 
--- Helpers
 local function ringPush(t)
     S.targetRingIdx = (S.targetRingIdx % RING_BUF) + 1
     S.targetRing[S.targetRingIdx] = t
@@ -119,11 +123,25 @@ local function getMyHRP()
     return ch and ch:FindFirstChild("HumanoidRootPart") or nil
 end
 
+local function requireP()
+    if P ~= nil then return P end
+    if AutoParry and type(AutoParry.getP) == "function" then
+        P = AutoParry.getP()
+    end
+    return P
+end
+
+local function getParryBonus()
+    if AutoParry and type(AutoParry.resRadiusBonus) == "function" then
+        return AutoParry.resRadiusBonus()
+    end
+    return 0
+end
+
 local function getBall()
     return GameInfo.getBall()
 end
 
--- Detector
 local function getDetectorRadius(spd)
     local t = math.clamp((spd or 0) / CLASH.DET_RAD_SPD_REF, 0, 1)
     return CLASH.DET_RAD_MIN + (CLASH.DET_RAD_MAX - CLASH.DET_RAD_MIN) * t
@@ -185,7 +203,6 @@ local function tickReturnDetector(t, hr, ball)
     S.detWasInside = isInside
 end
 
--- Snapshot
 local function clashSnapshot()
     local t = Utils.now()
     if _ctxCache.valid and (t - _ctxCache.t) < CLASH_SNAPSHOT_TTL then return _ctxCache end
@@ -201,10 +218,14 @@ local function clashSnapshot()
     local panic = nearestAlive and (nearest <= CLASH.PANIC_DIST and bDist <= CLASH.PANIC_BALL)
     local tImp, spd = 0, 0
     local live = GameInfo.liveTImp()
-    if live then tImp, spd = live.tImp, live.spd end
+    if live then
+        tImp = tonumber(live.tImp) or 0
+        spd  = tonumber(live.spd) or 0
+    end
     if spd < 1 then
         local ti, _, s2 = GameInfo.computeTImp(hr, ball, t)
-        tImp, spd = ti, s2
+        tImp = tonumber(ti) or tImp
+        spd  = tonumber(s2) or spd
     end
     _ctxCache.t, _ctxCache.valid = t, true
     _ctxCache.hr = hr
@@ -216,7 +237,6 @@ local function clashSnapshot()
     return _ctxCache
 end
 
--- Burst
 local function clearClash()
     S.clashOn, S.clashHoldUntil = false, 0
     S.clashOffAt = Utils.now()
@@ -247,30 +267,25 @@ local function _activateBurst(t)
     end
 end
 
--- Deactivation & Maintenance
-local function shouldDeactivateClash(t, ctx)
+local function shouldMaintainClash(t, ctx)
     if not S.clashOn then return false end
-    if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
-    if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
-    if t < S.teleportLockUntil then return true end
-    if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return true end
+    if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return true end
+    if (t - S.clashAt) > CLASH.MAX_HOLD then return false end
+    if t < S.teleportLockUntil then return false end
+    if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return false end
 
-    if ctx.tImp > CLASH.DEACT_TIMP_THRESH then
+    if (ctx.tImp or 0) > CLASH.DEACT_TIMP_THRESH then
         if S.tImpHighSince == 0 then S.tImpHighSince = t end
         if (t - S.tImpHighSince) >= CLASH.DEACT_TIMP_SUSTAIN then
-            return true
+            return false
         end
     else
         S.tImpHighSince = 0
     end
-    return false
+
+    return true
 end
 
-local function shouldReactivate(ctx)
-    return ctx.tImp <= CLASH.DEACT_TIMP_THRESH
-end
-
--- Evaluation
 local function evaluateClash(t, hr, ball, config)
     if not config or config.AutoClash == false or _G.PhantomManual then
         if S.clashOn then clearClash() end
@@ -282,7 +297,7 @@ local function evaluateClash(t, hr, ball, config)
     local ctx = clashSnapshot()
 
     if S.clashOn then
-        if ctx and shouldDeactivateClash(t, ctx) then
+        if ctx and not shouldMaintainClash(t, ctx) then
             clearClash()
             S.burstState          = "IDLE"
             S.burstSignalDuringOn = false
@@ -291,12 +306,12 @@ local function evaluateClash(t, hr, ball, config)
     end
 
     local antiDashActive = S.dashAnti.untilT > t
-    local canFire = (S.detSignal and isTargeted()) or antiDashActive
-
-    -- Reativação imediata se tImp <= THRESH durante burst OFF/IDLE se houver contexto
-    if ctx and shouldReactivate(ctx) and isTargeted() then
-        canFire = true
-    end
+    local panicActive    = S.dashPanicUntil > t
+    local targeted       = ctx and ctx.targeted or isTargeted()
+    
+    -- Ativação baseada em tImp e detSignal, evitando ativação cega por distância
+    local timpValid      = ctx and ctx.tImp > 0 and ctx.tImp <= CLASH.ACT_TIMP_THRESH or false
+    local canFire        = (S.detSignal and targeted) or antiDashActive or panicActive or (timpValid and targeted)
 
     if S.burstState == "IDLE" then
         if canFire then _activateBurst(t) end
@@ -321,7 +336,6 @@ local function evaluateClash(t, hr, ball, config)
     end
 end
 
--- Target
 local function onTarget(newTarget, t)
     if type(newTarget) ~= "number" then return end
     local previousTarget = S.lastTarget
@@ -332,7 +346,6 @@ local function onTarget(newTarget, t)
     if apState then apState.armed = (newTarget == _localUserId) end
 end
 
--- Dash
 local function updateDashTrack(t)
     if (t - _lastDashTrack) < CLASH.DASH_TRACK_INTERVAL then return end
     _lastDashTrack = t
@@ -470,7 +483,6 @@ local function installAntiDashHooks()
     end)
 end
 
--- API
 function AutoClash.setup(deps)
     Probe = deps.Probe
     GameInfo = deps.GameInfo
@@ -491,7 +503,6 @@ function AutoClash.evaluate(t, hr, ball, config)
 end
 
 function AutoClash.tickMaintenance()
-    -- Vazio mantido por compatibilidade de interface
 end
 
 function AutoClash.updateDashTrack(t)
@@ -538,7 +549,7 @@ function AutoClash.resetState()
 end
 
 function AutoClash.setTeleportLock(t)
-    S.tImpHighSince = t + 0.20
+    S.teleportLockUntil = t + 0.20
 end
 
 function AutoClash.recordFire(t)
