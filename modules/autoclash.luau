@@ -44,15 +44,10 @@ local CLASH = {
     ANTIDASH_PANIC_HOLD      = 0.45,
     ANTIDASH_PANIC_MAX       = 1.2,
     ANTIDASH_COOLDOWN        = 0.35,
-    MAINT_CHECK_INTERVAL     = 0.050,
-    MAINT_HOLD_MIN           = 0.060,
-    MAINT_BALL_RADIUS        = 25,
-    MAINT_TIMP_MAX           = 0.30,
-    MAINT_PARRY_KEEP         = 0.10,
-    MAINT_TARGET_KEEP        = 0.15,
     MAINT_BALL_GONE_DIST     = 60,
-    COLD_TIMP_CAP            = 0.210,
     MIN_HOLD                 = 0.050,
+    DEACT_TIMP_THRESH        = 0.25,
+    DEACT_TIMP_SUSTAIN       = 0.15,
 }
 
 local RING_BUF = 8
@@ -85,6 +80,7 @@ local S = {
     dashEvents          = {},
     dashPanicUntil      = 0,
     dashAnti            = { untilT = 0, src = nil, at = 0 },
+    tImpHighSince       = 0,
 }
 
 local _localUserId = -1
@@ -121,28 +117,6 @@ local function getMyHRP()
     local lp = Utils.getLocalPlayer()
     local ch = lp and lp.Character
     return ch and ch:FindFirstChild("HumanoidRootPart") or nil
-end
-
-local function getParryBonus()
-    return AutoParry.resRadiusBonus()
-end
-
-local function requireP()
-    if P ~= nil then return P end
-    if AutoParry and type(AutoParry.getP) == "function" then
-        P = AutoParry.getP()
-    end
-    return P
-end
-
-local function tImpCapFor(spd, base, refSpd, lo, hi)
-    if spd < 1 then return base end
-    local scaled = (base * refSpd) / math.max(spd, 1)
-    return math.clamp(scaled, lo, hi)
-end
-
-local function deactTimpMax(spd)
-    return tImpCapFor(spd, CLASH.MAINT_TIMP_MAX, 60, 0.08, 0.40)
 end
 
 local function getBall()
@@ -247,6 +221,7 @@ local function clearClash()
     S.clashOn, S.clashHoldUntil = false, 0
     S.clashOffAt = Utils.now()
     S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
+    S.tImpHighSince = 0
 end
 
 local function _activateBurst(t)
@@ -258,6 +233,7 @@ local function _activateBurst(t)
     S.clashHoldUntil      = t + CLASH.BURST_ON_MS
     S.lastClashReact      = t
     S.clashOffAt          = 0
+    S.tImpHighSince       = 0
     
     local config = Utils.getConfig()
     local c = math.max(tonumber(config and config.CPS) or 25, 1)
@@ -271,43 +247,27 @@ local function _activateBurst(t)
     end
 end
 
--- Deactivation (Padrão Exato V22.1)
-local function isBallApproaching(hrp, ball)
-    local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-    if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return true end
-    local toMe = hrp.Position - ball.Position
-    if toMe.Magnitude < 1 then return true end
-    return av:Dot(toMe.Unit) > 0.25
-end
-
-local function shouldDeactivateClash()
+-- Deactivation & Maintenance
+local function shouldDeactivateClash(t, ctx)
     if not S.clashOn then return false end
-    local t = Utils.now()
     if t < math.max(S.clashAt + CLASH.MIN_HOLD, S.clashHoldUntil) then return false end
     if (t - S.clashAt) > CLASH.MAX_HOLD then return true end
-    local lp = Utils.getLocalPlayer()
-    local myChar = lp.Character
-    if not (myChar and myChar.Parent) then return true end
-    local myHum = myChar:FindFirstChildOfClass("Humanoid")
-    if not (myHum and myHum.Parent and myHum.Health > 0) then return true end
     if t < S.teleportLockUntil then return true end
-    local ball = getBall()
-    if not (ball and ball.Parent) then return true end
-    local ctx = clashSnapshot()
-    if not ctx then return true end
     if ctx.bDist > CLASH.MAINT_BALL_GONE_DIST then return true end
-    local p = requireP()
-    local defR = p and p.DEFLECT_R or 8.5
-    local radFloor = p and p.RAD_FLOOR or 14
-    local deactRad = math.clamp(defR + radFloor, 18, 30)
-    if ctx.bDist > deactRad then return true end
-    if ctx.tImp > deactTimpMax(ctx.spd) then return true end
-    local hr = myChar:FindFirstChild("HumanoidRootPart")
-    if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
-        if not isBallApproaching(hr, ctx.ball) and ctx.bDist > 15 then return true end
+
+    if ctx.tImp > CLASH.DEACT_TIMP_THRESH then
+        if S.tImpHighSince == 0 then S.tImpHighSince = t end
+        if (t - S.tImpHighSince) >= CLASH.DEACT_TIMP_SUSTAIN then
+            return true
+        end
+    else
+        S.tImpHighSince = 0
     end
-    if ctx.spd < 1 and ctx.bDist > 20 then return true end
     return false
+end
+
+local function shouldReactivate(ctx)
+    return ctx.tImp <= CLASH.DEACT_TIMP_THRESH
 end
 
 -- Evaluation
@@ -319,16 +279,25 @@ local function evaluateClash(t, hr, ball, config)
         return
     end
     tickReturnDetector(t, hr, ball)
+    local ctx = clashSnapshot()
+
     if S.clashOn then
-        if shouldDeactivateClash() then
+        if ctx and shouldDeactivateClash(t, ctx) then
             clearClash()
             S.burstState          = "IDLE"
             S.burstSignalDuringOn = false
         end
         return
     end
+
     local antiDashActive = S.dashAnti.untilT > t
     local canFire = (S.detSignal and isTargeted()) or antiDashActive
+
+    -- Reativação imediata se tImp <= THRESH durante burst OFF/IDLE se houver contexto
+    if ctx and shouldReactivate(ctx) and isTargeted() then
+        canFire = true
+    end
+
     if S.burstState == "IDLE" then
         if canFire then _activateBurst(t) end
     elseif S.burstState == "ON" then
@@ -521,6 +490,10 @@ function AutoClash.evaluate(t, hr, ball, config)
     evaluateClash(t, hr, ball, config)
 end
 
+function AutoClash.tickMaintenance()
+    -- Vazio mantido por compatibilidade de interface
+end
+
 function AutoClash.updateDashTrack(t)
     updateDashTrack(t)
 end
@@ -560,11 +533,12 @@ function AutoClash.resetState()
     S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
     S.burstState, S.burstOnStart, S.burstOffStart, S.burstSignalDuringOn = "IDLE", 0, 0, false
     S.dashAnti = { untilT = 0, src = nil, at = 0 }
+    S.tImpHighSince = 0
     _ctxCache.valid = false
 end
 
 function AutoClash.setTeleportLock(t)
-    S.teleportLockUntil = t + 0.20
+    S.tImpHighSince = t + 0.20
 end
 
 function AutoClash.recordFire(t)
