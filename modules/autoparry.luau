@@ -1,462 +1,296 @@
 --[[ auto parry ]]
 
--- módulo
 local AutoParry = {}
 
 -- dependências
-local Probe
-local GameInfo
 local Utils
 
 -- tunings
 local P = {
-    FIRE_LOCK = 0.080,
-    FIRE_TIMEOUT = 2.0,
-    MIN_SPD = 3,
-    DEFLECT_R = 8.5,
-    RAD_FLOOR = 14,
-    LEAD_CAP = 80,
-    PRE_CAP = 30,
-    PB_WEIGHT = 1.0,
-    CPF_MIN_SPACING_MS = 0.05,
-    CPF_MAX_SPACING_MS = 16,
-    CPF_FPS_SAMPLE_T = 0.5,
-    CPF_PING_FLOOR = 0.040,
-    CPF_PING_REF = 0.060,
-    LEAD_PING_FLOOR = 0.060,
-    LEAD_RTT_MULT = 0.5,
-    LEAD_TICK_FRAMES = 2,
-    RES_BASE = 0,
-    RES_PER_PARRY = 0.225,
-    RES_CAP = 32,
-    RES_HOLD_T = 1.2,
-    RES_DECAY_T = 4.0,
-    RES_HITBOX_OWN_WINDOW = 0.5,
-    RES_HITBOX_PROX = 12,
-    MIN_REFIRE_GAP = 0.015,
-    REFIRE_TTH = 0.20,
-    GRACE_TIMEOUT = 0.30,
+	FIRE_LOCK = 0.080,
+	FIRE_TIMEOUT = 2.0,
+	MIN_SPD = 3,
+	DEFLECT_R = 8.5,
+	RAD_FLOOR = 14,
+	LEAD_CAP = 80,
+	PRE_CAP = 30,
+	LEAD_PING_FLOOR = 0.060,
+	LEAD_RTT_MULT = 0.5,
+	LEAD_TICK_FRAMES = 2,
+	RES_PER_PARRY = 0.225,
+	RES_CAP = 32,
+	RES_HOLD_T = 1.2,
+	RES_DECAY_T = 4.0,
+	GRACE_TIMEOUT = 0.30,
 }
 
--- estado ap
-local AP = {
-    armed = false,
-    fired = false,
-    firedAt = 0,
-    wasInRange = false,
-    inRangeEnterAt = 0,
-    lastValidSync = 0,
-    lastValidBall = 0,
-    lastMissAt = 0,
-}
-
--- estado res
-local RES = {
-    stack = 0,
-    lastFireBallRef = nil,
-    lastFireBallAt = 0,
-    lastHitboxAt = 0,
-    lastStackAt = 0
-}
-
--- estado sync
+-- estado
+local AP = { fired = false, firedAt = 0 }
+local RES = { stack = 0, lastFireBallRef = nil, lastFireBallAt = 0, lastStackAt = 0 }
 local Sync = {
-    Speed = 0,
-    RealPos = Vector3.new(0, 0, 0),
-    ForceDir = false,
-    ForcedDir = Vector3.new(0, 0, 0),
-    DeflectDir = Vector3.new(0, 0, 0),
-    Grace = false,
-    Teleported = false,
-    Target = -999,
-    lastSyncAt = 0,
-    forcedAt = 0,
-    hasRealPos = false,
+	Speed = 0,
+	RealPos = Vector3.new(0, 0, 0),
+	DeflectDir = Vector3.new(0, 0, 0),
+	Grace = false,
+	Target = -999,
+	lastSyncAt = 0,
+	hasRealPos = false,
 }
 
--- variáveis locais
-local _teleportLockUntil = 0
 local _apBind = 0
 local _localUserId = -1
 local _onFired = nil
 local _lastTargetSeen = -999
+local _teleportLockUntil = 0
 local _br = nil
 local _brTried = false
 
+-- módulos
+local function getProbe()
+	return Utils.getModule("Probe")
+end
+local function getGameInfo()
+	return Utils.getModule("GameInfo")
+end
+
 -- resiliência
 local function resRadiusBonus()
-    return math.min(RES.stack * P.RES_PER_PARRY, P.RES_CAP)
+	return math.min(RES.stack * P.RES_PER_PARRY, P.RES_CAP)
 end
 
 local function tickResilience(t)
-    if RES.stack <= 0 then
-        return
-    end
-    local since = t - RES.lastStackAt
-    if since > (P.RES_HOLD_T + P.RES_DECAY_T) then
-        RES.stack = 0
-        return
-    end
-    if since > P.RES_HOLD_T then
-        local frac = 1 - (since - P.RES_HOLD_T) / P.RES_DECAY_T
-        if frac <= 0 then
-            RES.stack = 0
-        else
-            local decayed = math.floor(RES.stack * frac + 0.5)
-            if decayed ~= RES.stack then
-                RES.stack = decayed
-            end
-        end
-    end
+	if RES.stack <= 0 then
+		return
+	end
+	local since = t - RES.lastStackAt
+	if since > (P.RES_HOLD_T + P.RES_DECAY_T) then
+		RES.stack = 0
+		return
+	end
+	if since > P.RES_HOLD_T then
+		local frac = 1 - (since - P.RES_HOLD_T) / P.RES_DECAY_T
+		RES.stack = math.floor(RES.stack * math.max(frac, 0) + 0.5)
+	end
 end
 
--- cooldown de deflexão
-local function getDeflectCD()
-    return GameInfo.getDeflectCD()
-end
-
--- disparo de parry
+-- disparo
 local function sendParry()
-    local t = Utils.now()
-    if not Probe.fireParry(1) then
-        return false
-    end
-    local b = GameInfo.getBall()
-    if b and b.Parent then
-        RES.lastFireBallRef, RES.lastFireBallAt = b, t
-    end
-    if _onFired then
-        _onFired(t)
-    end
-    return true
+	local t, Probe = Utils.now(), getProbe()
+	if not (Probe and Probe.fireParry(1)) then
+		return false
+	end
+	local GameInfo = getGameInfo()
+	local b = GameInfo and GameInfo.getBall()
+	if b and b.Parent then
+		RES.lastFireBallRef, RES.lastFireBallAt = b, t
+	end
+	if _onFired then
+		_onFired(t)
+	end
+	return true
 end
 
--- verificação de alvo
+-- alvo
 local function _ensureBR()
-    if _brTried then return _br end
-    _brTried = true
-    pcall(function()
-        local ts = Utils.getReplicatedStorage():FindFirstChild("TS")
-        if not ts then return end
-        local brMod = ts:FindFirstChild("BallReplicator")
-            and ts.BallReplicator:FindFirstChild("BallReplicator")
-        if brMod then
-            local ok, mod = pcall(require, brMod)
-            if ok and mod and mod.BallReplicator then
-                _br = mod.BallReplicator
-            end
-        end
-    end)
-    return _br
+	if _brTried then
+		return _br
+	end
+	_brTried = true
+	pcall(function()
+		local ts = Utils.getReplicatedStorage():FindFirstChild("TS")
+		if not ts then
+			return
+		end
+		-- busca recursiva para maior compatibilidade
+		local brMod = ts:FindFirstChild("BallReplicator", true)
+		if brMod and brMod:IsA("ModuleScript") then
+			local ok, mod = pcall(require, brMod)
+			if ok and mod then
+				_br = mod.BallReplicator or mod
+			end
+		end
+	end)
+	return _br
 end
 
-local function isTargetedByBall(character)
-    if not character then return false end
-    
-    if game:GetAttribute("GameBallTarget") == _localUserId then
-        return true
-    end
-    
-    local br = _ensureBR()
-    if br then
-        local syncData = br.syncData
-        if syncData and syncData.HighlightTargetPlayerID == _localUserId then
-            return true
-        end
-    end
-    
-    if Sync.Target == _localUserId then
-        return true
-    end
-    
-    return false
+local function isTargetedByBall()
+	if game:GetAttribute("GameBallTarget") == _localUserId then
+		return true
+	end
+	local br = _ensureBR()
+	if br and br.syncData and br.syncData.HighlightTargetPlayerID == _localUserId then
+		return true
+	end
+	return Sync.Target == _localUserId
 end
 
--- reset de estado
+-- reset
 local function resetState()
-    AP.armed, AP.fired, AP.firedAt = false, false, 0
-    AP.inRangeEnterAt, AP.wasInRange = 0, false
-    AP.lastMissAt = 0
-    RES.stack = 0
-    RES.lastFireBallRef = nil
-    RES.lastFireBallAt = 0
-    RES.lastHitboxAt = 0
-    RES.lastStackAt = 0
-    Sync.Speed = 0
-    Sync.RealPos = Vector3.new(0, 0, 0)
-    Sync.ForceDir = false
-    Sync.ForcedDir = Vector3.new(0, 0, 0)
-    Sync.DeflectDir = Vector3.new(0, 0, 0)
-    Sync.Grace = false
-    Sync.Teleported = false
-    Sync.Target = -999
-    Sync.lastSyncAt = 0
-    Sync.forcedAt = 0
-    Sync.hasRealPos = false
-    _teleportLockUntil = 0
-    _lastTargetSeen = -999
+	AP.fired, AP.firedAt = false, 0
+	RES.stack, RES.lastStackAt = 0, 0
+	RES.lastFireBallRef, RES.lastFireBallAt = nil, 0
+	Sync.Speed, Sync.lastSyncAt = 0, 0
+	Sync.RealPos, Sync.DeflectDir = Vector3.new(0, 0, 0), Vector3.new(0, 0, 0)
+	Sync.Grace, Sync.hasRealPos = false, false
+	Sync.Target = -999
+	_teleportLockUntil, _lastTargetSeen = 0, -999
 end
 
--- sincronização da bola
+-- sincronização
 local function onBallSync(data)
-    if typeof(data) ~= "table" then
-        return
-    end
-    local t = Utils.now()
-    if type(data.Speed) == "number" then
-        Sync.Speed = data.Speed
-    end
-    if typeof(data.RealPosition) == "Vector3" then
-        Sync.RealPos = data.RealPosition
-        Sync.hasRealPos = true
-    end
-    if typeof(data.DeflectDirection) == "Vector3" then
-        Sync.DeflectDir = data.DeflectDirection
-    end
-    if type(data.Grace) == "boolean" then
-        Sync.Grace = data.Grace
-    end
-    if type(data.ForceDirection) == "boolean" then
-        if data.ForceDirection and not Sync.ForceDir then
-            Sync.forcedAt = t
-        end
-        Sync.ForceDir = data.ForceDirection
-    end
-    if typeof(data.ForcedDirection) == "Vector3" then
-        Sync.ForcedDir = data.ForcedDirection
-    end
-    Sync.lastSyncAt = t
-    if data.Teleported == true then
-        _teleportLockUntil = t + 0.20
-        AP.fired = false
-        Sync.Teleported = true
-        return
-    end
-    Sync.Teleported = false
-    GameInfo.applySync(data)
-    local newTarget = data.TargetPlayerID
-    if type(newTarget) ~= "number" then
-        newTarget = -999
-    end
-
-    if newTarget == _lastTargetSeen then
-        Sync.Target = newTarget
-        return
-    end
-    local previousTarget = _lastTargetSeen
-    _lastTargetSeen, Sync.Target = newTarget, newTarget
-    if newTarget == _localUserId then
-        Sync.Grace = false
-        AP.fired = false
-    elseif newTarget ~= -999 then
-        Sync.Grace = true
-        if previousTarget == _localUserId then
-            AP.fired = false
-        end
-    else
-        AP.fired = false
-    end
-    if data.Grace == false then
-        Sync.Grace = false
-    elseif data.Grace == true then
-        Sync.Grace = true
-    end
+	if typeof(data) ~= "table" then
+		return
+	end
+	local t, GameInfo = Utils.now(), getGameInfo()
+	if type(data.Speed) == "number" then
+		Sync.Speed = data.Speed
+	end
+	if typeof(data.RealPosition) == "Vector3" then
+		Sync.RealPos, Sync.hasRealPos = data.RealPosition, true
+	end
+	if typeof(data.DeflectDirection) == "Vector3" then
+		Sync.DeflectDir = data.DeflectDirection
+	end
+	if type(data.Grace) == "boolean" then
+		Sync.Grace = data.Grace
+	end
+	Sync.lastSyncAt = t
+	if data.Teleported == true then
+		_teleportLockUntil, AP.fired = t + 0.20, false
+		return
+	end
+	if GameInfo then
+		GameInfo.applySync(data)
+	end
+	local newTarget = tonumber(data.TargetPlayerID) or -999
+	if newTarget ~= _lastTargetSeen then
+		local prev = _lastTargetSeen
+		_lastTargetSeen, Sync.Target = newTarget, newTarget
+		if newTarget == _localUserId or prev == _localUserId then
+			AP.fired = false
+		end
+		Sync.Grace = (newTarget ~= _localUserId and newTarget ~= -999)
+	end
+	if type(data.Grace) == "boolean" then
+		Sync.Grace = data.Grace
+	end
 end
-
--- bind de parry
-local function bindParry(character)
-    _apBind = _apBind + 1
-    local currentBindId = _apBind
-    if not (character and character.Parent) then
-        return
-    end
-    local hrp = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 1)
-    if currentBindId ~= _apBind or not (hrp and hrp.Parent) then
-        return
-    end
-    AP.fired, AP.armed = false, false
 
 -- heartbeat
-    Utils.trackCharacter(
-        Utils.getRunService().Heartbeat:Connect(
-            function(dt)
-                if currentBindId ~= _apBind or not (character.Parent and hrp.Parent) then
-                    return
-                end
-                local Config = Utils.getConfig()
-                if not Config or Config.AutoParry ~= true then
-                    AP.fired = false
-                    return
-                end
-                local t = Utils.now()
-                if Sync.Grace and (t - Sync.lastSyncAt) > P.GRACE_TIMEOUT then
-                    Sync.Grace = false
-                end
-                if t < _teleportLockUntil or Sync.Grace then
-                    return
-                end
-                if Utils.isClashActive() or Utils.isManualSpamActive() then
-                    return
-                end
-                tickResilience(t)
-                local ball = GameInfo.getBall()
-                if not (ball and ball.Parent) then
-                    return
-                end
-                if not isTargetedByBall(character) then
-                    AP.armed = false
-                    return
-                end
-                local syncFresh = (t - Sync.lastSyncAt) < 0.5
-                local spd
-                if syncFresh and Sync.Speed > 0 then
-                    spd = Sync.Speed
-                else
-                    spd = ball.AssemblyLinearVelocity.Magnitude
-                end
-                
-                if spd < P.MIN_SPD then
-                    return
-                end
-                
-                local bp
-                if syncFresh and Sync.hasRealPos then
-                    local pingSec = GameInfo.pingOneWay()
-                    if spd > 1 and pingSec > 0 then
-                        local dir = Sync.DeflectDir
-                        if not (dir and dir.Magnitude > 0.01) then
-                            dir = ball.AssemblyLinearVelocity
-                        end
-                        
-                        if dir and dir.Magnitude > 0.1 then
-                            bp = Sync.RealPos + dir.Unit * (spd * pingSec)
-                        else
-                            bp = Sync.RealPos
-                        end
-                    else
-                        bp = Sync.RealPos
-                    end
-                else
-                    bp = ball.Position
-                end
-                local tickMs = (GameInfo.frameEMA() > 0 and GameInfo.frameEMA() * 1000) or 16.67
-                local leadSec = math.max(
-                    GameInfo.pingRTT() * P.LEAD_RTT_MULT + (P.LEAD_TICK_FRAMES * tickMs / 1000),
-                    P.LEAD_PING_FLOOR
-                )
-                local leadB = math.min(spd * leadSec, P.LEAD_CAP)
-                local pbStuds = math.min(GameInfo.preBufferStuds(spd), P.PRE_CAP)
-                local parryRad = math.max(P.DEFLECT_R + leadB + pbStuds + resRadiusBonus(), P.RAD_FLOOR)
-                local dx = hrp.Position.X - bp.X
-                local dy = hrp.Position.Y - bp.Y
-                local dz = hrp.Position.Z - bp.Z
-                local dist2 = dx * dx + dy * dy + dz * dz
-                if dist2 > parryRad * parryRad then
-                    AP.wasInRange, AP.inRangeEnterAt = false, 0
-                    return
-                end
-                AP.wasInRange = true
-                local realCD = getDeflectCD()
-                if realCD > 0 then
-                    return
-                end
-                if AP.fired then
-                    if (t - AP.firedAt) < P.FIRE_LOCK then
-                        return
-                    end
-                    if (t - AP.firedAt) < P.FIRE_TIMEOUT then
-                        return
-                    end
-                    AP.fired = false
-                    AP.lastMissAt = t
-                end
-                if AP.firedAt > Sync.lastSyncAt then
-                    return
-                end
-                GameInfo.accumPingTimer(dt)
-                if GameInfo.shouldSamplePing(1.5) then
-                    GameInfo.samplePing()
-                end
-                if sendParry() then
-                    AP.fired, AP.firedAt = true, t
-                else
-                    AP.fired = false
-                    AP.lastMissAt = t
-                end
-            end
-        )
-    )
--- ancestry
-    Utils.trackCharacter(
-        character.AncestryChanged:Connect(
-            function(_, parent)
-                if not parent then
-                    _apBind = _apBind + 1
-                end
-            end
-        )
-    )
+local function bindParry(character)
+	_apBind = _apBind + 1
+	local currentBindId = _apBind
+	local hrp = character:WaitForChild("HumanoidRootPart", 5)
+	if not hrp or currentBindId ~= _apBind then
+		return
+	end
+	AP.fired = false
+	Utils.trackCharacter(
+		Utils.getRunService().Heartbeat:Connect(function(dt)
+			if currentBindId ~= _apBind or not (character.Parent and hrp.Parent) then
+				return
+			end
+			local Config, GameInfo = Utils.getConfig(), getGameInfo()
+			if not Config or Config.AutoParry ~= true or not GameInfo then
+				AP.fired = false
+				return
+			end
+			local t = Utils.now()
+			if Sync.Grace and (t - Sync.lastSyncAt) > P.GRACE_TIMEOUT then
+				Sync.Grace = false
+			end
+			if t < _teleportLockUntil or Sync.Grace or Utils.isClashActive() or Utils.isManualSpamActive() then
+				return
+			end
+			tickResilience(t)
+			local ball = GameInfo.getBall()
+			if not (ball and ball.Parent) or not isTargetedByBall() then
+				return
+			end
+			local syncFresh = (t - Sync.lastSyncAt) < 0.5
+			local spd = (syncFresh and Sync.Speed > 0) and Sync.Speed or ball.AssemblyLinearVelocity.Magnitude
+			if spd < P.MIN_SPD then
+				return
+			end
+			local bp = ball.Position
+			local tickMs = math.max(GameInfo.frameEMA() * 1000, 1)
+			local leadSec = math.max(
+				GameInfo.pingRTT() * P.LEAD_RTT_MULT + (P.LEAD_TICK_FRAMES * tickMs / 1000),
+				P.LEAD_PING_FLOOR
+			)
+			local parryRad = math.max(
+				P.DEFLECT_R
+					+ math.min(spd * leadSec, P.LEAD_CAP)
+					+ math.min(GameInfo.preBufferStuds(spd), P.PRE_CAP)
+					+ resRadiusBonus(),
+				P.RAD_FLOOR
+			)
+
+			-- otimização: distância ao quadrado
+			local myPos, bPos = hrp.Position, bp
+			local dx, dy, dz = myPos.X - bPos.X, myPos.Y - bPos.Y, myPos.Z - bPos.Z
+			if (dx * dx + dy * dy + dz * dz) > (parryRad * parryRad) then
+				return
+			end
+
+			if GameInfo.getDeflectCD() > 0 then
+				return
+			end
+			if AP.fired then
+				if (t - AP.firedAt) < P.FIRE_LOCK or (t - AP.firedAt) < P.FIRE_TIMEOUT then
+					return
+				end
+				AP.fired = false
+			end
+			if AP.firedAt > Sync.lastSyncAt then
+				return
+			end
+			GameInfo.accumPingTimer(dt)
+			if GameInfo.shouldSamplePing(1.5) then
+				GameInfo.samplePing()
+			end
+			if sendParry() then
+				AP.fired, AP.firedAt = true, t
+			else
+				AP.fired = false
+			end
+		end)
+	)
 end
 
 -- setup
-function AutoParry.setup(deps)
-    Probe = deps.Probe
-    GameInfo = deps.GameInfo
-    Utils = deps.Utils
-    _localUserId = Utils.getLocalPlayer().UserId
+function AutoParry.setup(u)
+	Utils = u
+	_localUserId = Utils.getLocalPlayer().UserId
 end
 
--- api pública
+-- api
 function AutoParry.setOnFired(fn)
-    _onFired = fn
+	_onFired = fn
 end
-
 function AutoParry.fire()
-    return sendParry()
+	return sendParry()
 end
-
 function AutoParry.bindParry(character)
-    bindParry(character)
+	bindParry(character)
 end
-
 function AutoParry.resetState()
-    resetState()
+	resetState()
 end
-
 function AutoParry.onBallSync(data)
-    onBallSync(data)
+	onBallSync(data)
 end
-
 function AutoParry.resRadiusBonus()
-    return resRadiusBonus()
+	return resRadiusBonus()
 end
-
 function AutoParry.getState()
-    return AP
+	return AP
 end
-
-function AutoParry.getRes()
-    return RES
-end
-
 function AutoParry.getSync()
-    return Sync
+	return Sync
 end
-
-function AutoParry.getLastFireBallRef()
-    return RES.lastFireBallRef
-end
-
-function AutoParry.getLastFireBallAt()
-    return RES.lastFireBallAt
-end
-
 function AutoParry.getP()
-    return P
-end
-
-if _G.ExodusModules then
-    _G.ExodusModules.AutoParry = AutoParry
+	return P
 end
 
 return AutoParry
