@@ -87,11 +87,13 @@ end
 -- disparo de spam
 local function sendSpam()
     local t = Utils.now()
-    if t < _spamCooldownUntil then
+    if not Utils.isManualSpamActive() and t < _spamCooldownUntil then
         return false
     end
     if not Probe.fireParry(1) then
-        _spamCooldownUntil = t + 0.25
+        if not Utils.isManualSpamActive() then
+            _spamCooldownUntil = t + 0.25
+        end
         Probe.invalidateRemote()
         return false
     end
@@ -172,14 +174,17 @@ local function tickSpam(dt)
 
     if config.SpamRateMode == "CPF" then
         local t = Utils.now()
-        if not drainBurst(t) then
+        if Utils.isManualSpamActive() then
+            -- Disparo direto e imediato no manual spam
+            for i = 1, math.min(getCPF(), SPAM.MAX_PER_ITER) do
+                sendSpam()
+            end
             return
         end
-        if not _burstActive and t >= _nextCpfBurstAt then
+        if not _burstActive then
             queueBurst(t)
-            _nextCpfBurstAt = t + math.max(dt, 1 / math.max(_fpsSmooth, 1))
-            drainBurst(t)
         end
+        drainBurst(t)
         return
     end
 
