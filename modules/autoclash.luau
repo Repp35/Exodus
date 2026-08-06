@@ -1,6 +1,4 @@
---[[
-    AutoClash Module - Phantom Ball Logic
-]]--
+-- [[ auto clash ]]
 
 local AutoClash = {}
 
@@ -10,6 +8,7 @@ local Utils
 local AutoParry
 local P = nil
 
+-- tuning
 local CLASH = {
     BALL_HARD_CAP            = 22,
     HOLD                     = 0.20,
@@ -57,6 +56,7 @@ local CLASH = {
 
 local RING_BUF = 8
 
+-- state
 local S = {
     lastTarget          = -999,
     lastTargetAt        = 0,
@@ -94,6 +94,7 @@ local _ctxCache = { t = 0, valid = false }
 local CLASH_SNAPSHOT_TTL = 0.05
 local _spamDebt = 0
 
+-- internal
 local function ringPush(t)
     S.targetRingIdx = (S.targetRingIdx % RING_BUF) + 1
     S.targetRing[S.targetRingIdx] = t
@@ -146,6 +147,7 @@ local function getDetectorRadius(spd)
     return CLASH.DET_RAD_MIN + (CLASH.DET_RAD_MAX - CLASH.DET_RAD_MIN) * t
 end
 
+-- detector
 local function tickReturnDetector(t, hr, ball)
     S.detSignal = false
     if not (hr and hr.Parent and ball and ball.Parent) then
@@ -202,6 +204,7 @@ local function tickReturnDetector(t, hr, ball)
     S.detWasInside = isInside
 end
 
+-- logic
 local function clashSnapshot()
     local t = Utils.now()
     if _ctxCache.valid and (t - _ctxCache.t) < CLASH_SNAPSHOT_TTL then return _ctxCache end
@@ -346,6 +349,7 @@ local function onTarget(newTarget, t)
     if apState then apState.armed = (newTarget == _localUserId) end
 end
 
+-- dash
 local function updateDashTrack(t)
     if (t - _lastDashTrack) < CLASH.DASH_TRACK_INTERVAL then return end
     _lastDashTrack = t
@@ -483,6 +487,7 @@ local function installAntiDashHooks()
     end)
 end
 
+-- public
 function AutoClash.setup(deps)
     Probe = deps.Probe
     GameInfo = deps.GameInfo
@@ -563,5 +568,3 @@ end
 if _G.ExodusModules then
     _G.ExodusModules.AutoClash = AutoClash
 end
-
-return AutoClash
