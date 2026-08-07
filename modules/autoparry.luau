@@ -18,8 +18,6 @@ local P = {
     RES_CAP       = 32,
     RES_HOLD_T    = 1.2,
     RES_DECAY_T   = 4.0,
-    TICK_PROCESS  = 0.033,
-    PING_FLOOR    = 0.020,
 }
 
 
@@ -202,35 +200,33 @@ local function bindParry(character)
                 return
             end
 
-
-            local spd = ball.AssemblyLinearVelocity.Magnitude
+            
+            local syncFresh = (t - Sync.lastSyncAt) < 0.5
+            local positionFresh = Sync.hasRealPos and (t - Sync.positionAt) < 0.5
+            local spd = (syncFresh and Sync.Speed > 0)
+                and Sync.Speed
+                or ball.AssemblyLinearVelocity.Magnitude
             if spd < P.MIN_SPD then return end
 
-            local pingSec = 0
-            pcall(function()
-                local s = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
-                if type(s) == "number" and s > 0 then pingSec = s / 1000 end
-            end)
-            if pingSec < P.PING_FLOOR then pingSec = P.PING_FLOOR end
-            local lead = pingSec + P.TICK_PROCESS
-
-            local info = GameInfo.liveTImp()
-            local tImp = info.tImp
-            local buffer = (P.RAD_FLOOR + P.RES_CAP) / spd
-            if tImp > lead + buffer then return end
-
-            local bp = info.bp
-            local parryRad = P.DEFLECT_R + resRadiusBonus()
-            if parryRad < P.RAD_FLOOR then parryRad = P.RAD_FLOOR end
-            local dx, dy, dz = hrp.Position.X - bp.X, hrp.Position.Y - bp.Y, hrp.Position.Z - bp.Z
-            local dist2 = dx*dx + dy*dy + dz*dz
-            if dist2 > parryRad * parryRad then
-                print(string.format("[AP-DBG] dist=%.1f parryRad=%.1f spd=%.1f tImp=%.3f lead=%.3f window=%.3f pingSec=%.3f",
-                    math.sqrt(dist2), parryRad, spd, tImp, lead, lead + buffer, pingSec))
-                return
+            
+            local bp
+            if positionFresh then
+                local av = ball.AssemblyLinearVelocity
+                local direction = Sync.DeflectDir.Magnitude > 0.1 and Sync.DeflectDir.Unit
+                    or (av.Magnitude > 0.1 and av.Unit or nil)
+                if direction then
+                    bp = Sync.RealPos + direction * (spd * (t - Sync.positionAt))
+                else
+                    bp = Sync.RealPos
+                end
+            else
+                bp = ball.Position
             end
-            print(string.format("[AP-FIRE] dist=%.1f parryRad=%.1f spd=%.1f tImp=%.3f lead=%.3f",
-                math.sqrt(dist2), parryRad, spd, tImp, lead))
+
+            
+            local parryRad = math.max(P.DEFLECT_R + resRadiusBonus(), P.RAD_FLOOR)
+            local dx, dy, dz = hrp.Position.X - bp.X, hrp.Position.Y - bp.Y, hrp.Position.Z - bp.Z
+            if dx*dx + dy*dy + dz*dz > parryRad * parryRad then return end
 
             if getDeflectCD() > 0 then return end
             if AP.fired and (t - AP.firedAt) < P.FIRE_TIMEOUT then return end
