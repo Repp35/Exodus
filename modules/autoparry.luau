@@ -224,7 +224,9 @@ local function bindParry(character)
             end
 
             
-            local parryRad = math.max(P.DEFLECT_R + resRadiusBonus(), P.RAD_FLOOR)
+            local leadAge = positionFresh and (t - Sync.positionAt) or 0
+            local leadB = spd * leadAge
+            local parryRad = math.max(P.DEFLECT_R + leadB + resRadiusBonus(), P.RAD_FLOOR)
             local dx, dy, dz = hrp.Position.X - bp.X, hrp.Position.Y - bp.Y, hrp.Position.Z - bp.Z
             if dx*dx + dy*dy + dz*dz > parryRad * parryRad then return end
 
