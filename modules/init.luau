@@ -1,4 +1,4 @@
---[[ init ]]
+-- [[ init ]]
 
 _G.ExodusModules = _G.ExodusModules or {}
 
@@ -18,15 +18,16 @@ local ModuleURLs = {
     GUI = BASE_URL .. BRANCH .. "/ui-2.luau"
 }
 
+-- loader
 local function getLatestSHA()
-    -- Adicionamos um timestamp para evitar que a própria chamada da API seja cacheada por proxies
+    
     local apiURL = "https://api.github.com/repos/" .. REPO .. "/commits/" .. BRANCH .. "?t=" .. os.time()
     
     local success, result = pcall(function()
         local body
         local httpService = game:GetService("HttpService")
         
-        -- Headers para evitar bloqueios da API do GitHub (User-Agent é obrigatório)
+        
         local headers = {
             ["User-Agent"] = "Exodus-Loader/1.0",
             ["Cache-Control"] = "no-cache"
@@ -42,14 +43,17 @@ local function getLatestSHA()
                 body = r.Body
             end
         elseif type(game.HttpGet) == "function" then
-            -- Alguns executores não permitem passar headers no HttpGet, então tentamos direto
+            
             body = game:HttpGet(apiURL)
         end
         
-        if body then
+        if type(body) == "string" and body ~= "" then
             local data = httpService:JSONDecode(body)
-            return data and data.sha
+            if type(data) == "table" and type(data.sha) == "string" and #data.sha >= 7 then
+                return data.sha
+            end
         end
+        return nil
     end)
     
     return success and result or nil
@@ -67,7 +71,7 @@ local function updateURLs()
         versionIdentifier = "refs/heads/" .. BRANCH
     end
     
-    -- Reconstrói as URLs garantindo o formato correto para SHA ou Branch
+    
     ModuleURLs.Utils = BASE_URL .. versionIdentifier .. "/modules/utils.luau"
     ModuleURLs.GameInfo = BASE_URL .. versionIdentifier .. "/modules/gameinfo.luau"
     ModuleURLs.Probe = BASE_URL .. versionIdentifier .. "/modules/probe.luau"
@@ -79,6 +83,7 @@ end
 
 updateURLs()
 
+-- config
 local CONFIG = {
     AutoParry = true,
     AutoClash = true,
@@ -92,17 +97,24 @@ local CONFIG = {
 }
 
 local function fetchSource(url)
+    if type(url) ~= "string" or url == "" then return nil end
     local success, result = pcall(function()
         if type(_G.request) == "function" then
             local r = _G.request({Url = url, Method = "GET"})
-            return r and r.Body
+            if type(r) ~= "table" or type(r.Body) ~= "string" then
+                error("Resposta HTTP inválida.")
+            end
+            if type(r.StatusCode) == "number" and r.StatusCode ~= 200 then
+                error("HTTP " .. tostring(r.StatusCode))
+            end
+            return r.Body
         end
         if type(game.HttpGet) == "function" then
             return game:HttpGet(url)
         end
         error("Nenhum serviço HTTP encontrado (request ou HttpGet).")
     end)
-    if not success then
+    if not success or type(result) ~= "string" or result == "" then
         warn("[Exodus Loader] Erro ao baixar de " .. url .. ": " .. tostring(result))
         return nil
     end
@@ -110,6 +122,9 @@ local function fetchSource(url)
 end
 
 local function loadModule(name, url)
+    if type(loadstring) ~= "function" then
+        error("loadstring não está disponível neste ambiente.")
+    end
     local source = fetchSource(url)
     if not source then return nil end
 
@@ -125,206 +140,201 @@ local function loadModule(name, url)
         return nil
     end
 
+    if type(module) ~= "table" then
+        warn("[Exodus Loader] O módulo " .. name .. " não retornou uma tabela.")
+        return nil
+    end
+
     _G.ExodusModules[name] = module
     return module
 end
 
+-- start
 function Init.start()
     print("[Exodus] Iniciando carregamento via loadstring...")
 
-    local Utils = loadModule("Utils", ModuleURLs.Utils)
-    if not Utils then error("Falha crítica: Utils não carregado.") end
+    if type(_G.PhantomStop) == "function" then
+        pcall(_G.PhantomStop)
+    end
 
-    local modulesToLoad = {"GameInfo", "Probe", "AutoParry", "AutoClash", "Spam"}
+    local loaded = {}
+    local modulesToLoad = {"Utils", "GameInfo", "Probe", "AutoParry", "AutoClash", "Spam"}
     for _, name in ipairs(modulesToLoad) do
-        if not loadModule(name, ModuleURLs[name]) then
-            warn("[Exodus] Aviso: Falha ao carregar " .. name)
+        loaded[name] = loadModule(name, ModuleURLs[name])
+        if not loaded[name] then
+            error("Falha crítica: " .. name .. " não carregado.")
         end
     end
 
-    local GameInfo = _G.ExodusModules.GameInfo
-    local Probe = _G.ExodusModules.Probe
-    local AutoParry = _G.ExodusModules.AutoParry
-    local AutoClash = _G.ExodusModules.AutoClash
-    local Spam = _G.ExodusModules.Spam
+    local Utils = loaded.Utils
+    local GameInfo = loaded.GameInfo
+    local Probe = loaded.Probe
+    local AutoParry = loaded.AutoParry
+    local AutoClash = loaded.AutoClash
+    local Spam = loaded.Spam
 
     Utils.start()
     Utils.setConfig(CONFIG)
+    Utils.setModuleURLs(ModuleURLs)
 
-    if GameInfo then GameInfo.setup({Utils = Utils}) end
-    if Probe then Probe.setup({Utils = Utils}) end
-    if AutoParry then AutoParry.setup({Probe = Probe, GameInfo = GameInfo, Utils = Utils}) end
-    if AutoClash then AutoClash.setup({Probe = Probe, GameInfo = GameInfo, Utils = Utils, AutoParry = AutoParry}) end
-    if Spam then Spam.setup({Probe = Probe, GameInfo = GameInfo, Utils = Utils, AutoClash = AutoClash}) end
+    GameInfo.setup({Utils = Utils})
+    Probe.setup({Utils = Utils})
+    AutoParry.setup({Probe = Probe, GameInfo = GameInfo, Utils = Utils})
+    AutoClash.setup({Probe = Probe, GameInfo = GameInfo, Utils = Utils, AutoParry = AutoParry})
+    Spam.setup({Probe = Probe, GameInfo = GameInfo, Utils = Utils, AutoClash = AutoClash})
 
-    -- AutoClash dispara isso quando quer clicar de verdade. Sem isso, o
-    -- activateBurst sobe o estado mas nunca chama o remote.
+    
+    
     _G.PhantomOnBurst = function()
         if AutoParry and type(AutoParry.fire) == "function" then
             pcall(AutoParry.fire)
         end
     end
 
-    -- Globais espelhados pros módulos que checam via _G (probe, init legacy).
-    Utils.setOnClashOn(function()
-        if AutoClash and AutoClash.clashOn then
-            return AutoClash.clashOn()
-        end
-        return false
-    end)
-    _G.PhantomClashOn = function()
-        if AutoClash and AutoClash.clashOn then
-            return AutoClash.clashOn()
-        end
-        return false
+    
+    local function clashOn()
+        return AutoClash.clashOn()
+    end
+    Utils.setOnClashOn(clashOn)
+    _G.PhantomClashOn = clashOn
+
+    local function getConfig()
+        local cfg = Utils.getConfig()
+        return type(cfg) == "table" and cfg or CONFIG
     end
 
-    local function getConfig() return Utils.getConfig() or CONFIG end
-
-    -- Keybinds: F9 limpa clash, F toggle manualSpam
+    
     local UIS = Utils.getUserInputService()
-    local keyConn = nil
-    local keyHoldConn = nil
     local function installKeys()
-        if keyConn then pcall(function() keyConn:Disconnect() end) keyConn = nil end
-        if keyHoldConn then pcall(function() keyHoldConn:Disconnect() end) keyHoldConn = nil end
-        local cfg = getConfig()
-        local panic = cfg.Keybind or CONFIG.Keybind
-        local spam = cfg.SpamKeybind or CONFIG.SpamKeybind
-        local mode = (cfg.SpamMode == "Hold") and "Hold" or "Toggle"
-        keyConn = UIS.InputBegan:Connect(function(i, gpe)
+        Utils.track(UIS.InputBegan:Connect(function(i, gpe)
             if gpe then return end
+            local cfg = getConfig()
+            local panic = cfg.Keybind or CONFIG.Keybind
+            local spam = cfg.SpamKeybind or CONFIG.SpamKeybind
+            local mode = cfg.SpamMode == "Hold" and "Hold" or "Toggle"
+
             if i.KeyCode == panic then
-                if AutoClash and AutoClash.getState then
-                    local s = AutoClash.getState()
-                    s.clashOn, s.clashHoldUntil = false, 0
-                    s.clashOffAt = Utils.now()
-                end
-                if AutoParry and AutoParry.getState then
-                    local ap = AutoParry.getState()
-                    ap.fired = false
-                end
+                AutoClash.forceClear()
+                local ap = AutoParry.getState()
+                if ap then ap.fired = false end
                 Utils.setManualSpamActive(false)
-                _G.PhantomManual = false
             elseif i.KeyCode == spam then
                 if mode == "Hold" then
                     Utils.setManualSpamActive(true)
-                    _G.PhantomManual = true
                 else
-                    local cur = (_G.PhantomManual == true) or Utils.isManualSpamActive()
-                    local nv = not cur
-                    Utils.setManualSpamActive(nv)
-                    _G.PhantomManual = nv
+                    Utils.setManualSpamActive(not Utils.isManualSpamActive())
                 end
             end
-        end)
-        if mode == "Hold" then
-            keyHoldConn = UIS.InputEnded:Connect(function(i)
-                if i.KeyCode == spam then
-                    Utils.setManualSpamActive(false)
-                    _G.PhantomManual = false
-                end
-            end)
-        end
+        end))
+
+        Utils.track(UIS.InputEnded:Connect(function(i)
+            local cfg = getConfig()
+            local spam = cfg.SpamKeybind or CONFIG.SpamKeybind
+            if cfg.SpamMode == "Hold" and i.KeyCode == spam then
+                Utils.setManualSpamActive(false)
+            end
+        end))
     end
     installKeys()
 
-    -- Hook de BallSync via probe (necessário pra AutoClash.tryInlineActivate
-    -- reagir a mudanças de target em tempo real).
+    
+    
+    
+    local localPlayer = Utils.getLocalPlayer()
+    local _localUserId = localPlayer and localPlayer.UserId or -1
+    local _lastBallTarget = -999
     local function onBallSync(d)
-        if AutoParry and AutoParry.onBallSync then
-            pcall(AutoParry.onBallSync, d)
+        if typeof(d) ~= "table" then return end
+        local ok, err = pcall(AutoParry.onBallSync, d)
+        if not ok then
+            warn("[Exodus] Erro ao processar BallSync: " .. tostring(err))
+            return
         end
-        if AutoClash and AutoClash.tryInlineActivate then
-            local lp = Utils.getLocalPlayer()
-            local ch = lp and lp.Character
-            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-            local ball = GameInfo and GameInfo.getBall and GameInfo.getBall()
-            if hrp and hrp.Parent and ball and ball.Parent then
-                pcall(AutoClash.tryInlineActivate, Utils.now(), hrp, ball, getConfig())
-            end
+
+        local newTarget = d.TargetPlayerID
+        if type(newTarget) ~= "number" then newTarget = -999 end
+        local targetJustChangedToMe = newTarget == _localUserId and _lastBallTarget ~= _localUserId
+        _lastBallTarget = newTarget
+        if not targetJustChangedToMe then return end
+
+        local ch = localPlayer and localPlayer.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        local ball = GameInfo.getBall()
+        if hrp and hrp.Parent and ball and ball.Parent then
+            pcall(AutoClash.evaluate, Utils.now(), hrp, ball, getConfig(), true)
         end
-    end
-    if Probe and Probe.bindBallSync then
-        pcall(Probe.bindBallSync, onBallSync, Utils.track)
     end
 
-    -- Anti-dash: instala hooks nos players (animações de dash).
-    if AutoClash and AutoClash.installAntiDashHooks then
-        task.defer(function()
-            pcall(AutoClash.installAntiDashHooks)
-        end)
+    pcall(GameInfo.installBallWatcher, Utils.track)
+    pcall(Probe.bindBallSync, onBallSync, Utils.track)
+
+    task.defer(function()
+        pcall(AutoClash.installAntiDashHooks)
+    end)
+
+    
+    
+    local characterGeneration = 0
+
+    local function resetStates()
+        pcall(AutoParry.resetState)
+        pcall(AutoClash.resetState)
+        pcall(Spam.resetState)
     end
 
-    -- Loop principal por character: Heartbeat chamando AutoClash.evaluate,
-    -- AutoClash.updateDashTrack, Spam.tick — sem isso, NENHUM clique acontece.
-    local dead = false
-    local function bindChar(ch)
+    local function bindChar(ch, generation)
         if not (ch and ch.Parent) then return end
         local hrp = ch:WaitForChild("HumanoidRootPart", 10)
-        if not (hrp and hrp.Parent) then return end
-        dead = false
+        if generation ~= characterGeneration or not (hrp and hrp.Parent) then return end
 
-        local ancestryConn
-        ancestryConn = ch.AncestryChanged:Connect(function(_, parent)
-            if not parent then
-                dead = true
-                pcall(function()
-                    if AutoParry and AutoParry.resetState then AutoParry.resetState() end
-                    if AutoClash and AutoClash.resetState then AutoClash.resetState() end
-                    if Spam and Spam.resetState then Spam.resetState() end
-                end)
-            end
-        end)
-        Utils.trackCharacter(ancestryConn)
+        local dead = false
+        local function deactivate()
+            if dead then return end
+            dead = true
+            resetStates()
+        end
+
+        Utils.trackCharacter(ch.AncestryChanged:Connect(function(_, parent)
+            if not parent then deactivate() end
+        end))
 
         local hum = ch:FindFirstChildOfClass("Humanoid")
         if hum then
-            Utils.trackCharacter(hum.Died:Connect(function()
-                pcall(function()
-                    if AutoParry and AutoParry.resetState then AutoParry.resetState() end
-                    if AutoClash and AutoClash.resetState then AutoClash.resetState() end
-                    if Spam and Spam.resetState then Spam.resetState() end
-                end)
-            end))
+            Utils.trackCharacter(hum.Died:Connect(deactivate))
         end
 
         local runService = Utils.getRunService()
-        local config = getConfig()
-        
-        Utils.trackCharacter(
-            runService.Heartbeat:Connect(function(dt)
-                if dead or not Utils.isActive() then return end
-                if not (ch.Parent and hrp.Parent) then dead = true return end
-                
-                local t = os.clock()
-                local ball = GameInfo.getBall()
-                
-                -- Otimizado: chamadas diretas sem pcall excessivo no hot path
-                if AutoClash then
-                    AutoClash.updateDashTrack(t)
-                    AutoClash.evaluate(t, hrp, ball, config)
-                    AutoClash.invalidateSnapshot()
-                end
-                
-                if Spam then
-                    Spam.tick(dt)
-                end
-                
-                if GameInfo then
-                    GameInfo.sampleFrameDelta(dt)
-                end
-            end)
-        )
+        Utils.trackCharacter(runService.Heartbeat:Connect(function(dt)
+            if generation ~= characterGeneration or dead or not Utils.isActive() then return end
+            if not (ch.Parent and hrp.Parent) then
+                deactivate()
+                return
+            end
+
+            local t = Utils.now()
+            local ball = GameInfo.getBall()
+            AutoClash.updateDashTrack(t)
+            AutoClash.evaluate(t, hrp, ball, getConfig())
+            AutoClash.invalidateSnapshot()
+            Spam.tick(dt)
+        end))
     end
 
     local function setupCharacter(character)
         if not character then return end
+        characterGeneration = characterGeneration + 1
+        local generation = characterGeneration
+        Utils.disconnectCharacterConnections()
+
         task.defer(function()
-            pcall(AutoParry.bindParry, character)
+            if generation == characterGeneration and Utils.isActive() then
+                pcall(AutoParry.bindParry, character)
+            end
         end)
         task.defer(function()
-            pcall(bindChar, character)
+            if generation == characterGeneration and Utils.isActive() then
+                pcall(bindChar, character, generation)
+            end
         end)
     end
 
@@ -336,40 +346,29 @@ function Init.start()
         setupCharacter(lp.Character)
     end
 
-    -- Resolve remoto em background: tenta várias vezes nos primeiros segundos
-    -- pq o jogo pode demorar pra replicar a TS folder.
-    task.spawn(function()
-        for _ = 1, 30 do
-            pcall(function()
-                if Probe and Probe.refreshRefs then Probe.refreshRefs() end
-                if Probe and Probe.resolveRemote then
-                    local r = Probe.resolveRemote()
-                    if not r and Probe.probeNamed then Probe.probeNamed() end
-                end
-                if Probe and Probe.initParry then Probe.initParry() end
-            end)
-            task.wait(1)
-        end
-    end)
-
-    -- Revalidação periódica do remote (caso o jogo troque a TS folder).
+    
+    
     task.spawn(function()
         while Utils.isActive() do
-            pcall(function()
-                if not Probe then return end
-                local r, m = Probe.getRemote()
-                if not (r and r.Parent and r:IsA("RemoteEvent")) then
-                    if Probe.invalidate then Probe.invalidate() end
-                    if Probe.invalidateRemote then Probe.invalidateRemote() end
-                    if Probe.resolveRemote then Probe.resolveRemote() end
-                    if Probe.probeNamed then Probe.probeNamed() end
-                    if Probe.initParry then Probe.initParry() end
+            local initialized = false
+            local ok, err = pcall(function()
+                local remote = Probe.getRemote()
+                if remote and not (remote.Parent and remote:IsA("RemoteEvent")) then
+                    Probe.invalidate()
+                    remote = nil
                 end
-                if Probe.bindBallSync then
-                    pcall(Probe.bindBallSync, onBallSync, Utils.track)
+                if not remote then
+                    remote = Probe.resolveRemote()
                 end
+                if remote then
+                    initialized = Probe.initParry() == true
+                end
+                Probe.bindBallSync(onBallSync, Utils.track)
             end)
-            task.wait(3.0)
+            if not ok then
+                warn("[Exodus] Erro na manutenção remota: " .. tostring(err))
+            end
+            task.wait(initialized and 3.0 or 1.0)
         end
     end)
 
@@ -380,9 +379,10 @@ function Init.start()
             local fn, err = loadstring(guiSource, "ExodusGUI")
             if fn then
                 Utils.setGUISource(guiSource)
+                _G.ExodusModules.GUI = nil
                 local ok, result = pcall(fn)
                 if ok then
-                    local PhantomUI = result or _G.ExodusModules.GUI
+                    local PhantomUI = type(result) == "table" and result or _G.ExodusModules.GUI
                     if PhantomUI and type(PhantomUI.setup) == "function" then
                         local ok2, err3 = pcall(PhantomUI.setup, {Utils = Utils})
                         if ok2 then
@@ -400,10 +400,13 @@ function Init.start()
             else
                 warn("[Exodus] Erro de sintaxe na GUI: " .. tostring(err))
             end
+        else
+            warn("[Exodus] Não foi possível baixar a interface.")
         end
     end)
 
     print("[Exodus] Sistema inicializado e compartilhado em _G.ExodusModules")
+    return true
 end
 
 _G.ExodusModules.Init = Init
