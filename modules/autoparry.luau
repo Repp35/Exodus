@@ -228,10 +228,10 @@ local function bindParry(character)
             end
 
             
-            local tickMs = (GameInfo.frameEMA() > 0 and GameInfo.frameEMA() * 1000) or 16.67
-            local leadSec = P.LEAD_PING_FLOOR + (P.LEAD_TICK_FRAMES * tickMs / 1000)
+            local ti = GameInfo.liveTImp()
+            local leadSec = math.max(ti.tImp or 0, P.LEAD_PING_FLOOR)
             local leadB = math.min(spd * leadSec, P.LEAD_CAP)
-            local pbStuds = math.min(GameInfo.preBufferStuds(spd), P.PRE_CAP)
+            local pbStuds = math.min(spd * (1/60), P.PRE_CAP)
             local parryRad = math.max(P.DEFLECT_R + leadB + pbStuds + resRadiusBonus(), P.RAD_FLOOR)
             local dx, dy, dz = hrp.Position.X - bp.X, hrp.Position.Y - bp.Y, hrp.Position.Z - bp.Z
             if dx*dx + dy*dy + dz*dz > parryRad * parryRad then return end
