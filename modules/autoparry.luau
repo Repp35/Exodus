@@ -9,15 +9,19 @@ local Utils
 
 -- tuning
 local P = {
-    FIRE_TIMEOUT  = 2.0,
-    MIN_SPD       = 5,
-    DEFLECT_R     = 8.5,
-    RAD_FLOOR     = 14,
-    GRACE_TIMEOUT = 0.30,
-    RES_PER_PARRY = 0.225,
-    RES_CAP       = 32,
-    RES_HOLD_T    = 1.2,
-    RES_DECAY_T   = 4.0,
+    FIRE_TIMEOUT    = 2.0,
+    MIN_SPD         = 5,
+    DEFLECT_R       = 8.5,
+    RAD_FLOOR       = 14,
+    GRACE_TIMEOUT   = 0.30,
+    RES_PER_PARRY   = 0.225,
+    RES_CAP         = 32,
+    RES_HOLD_T      = 1.2,
+    RES_DECAY_T     = 4.0,
+    LEAD_CAP        = 80,
+    PRE_CAP         = 30,
+    LEAD_PING_FLOOR = 0.060,
+    LEAD_TICK_FRAMES = 2,
 }
 
 
@@ -224,9 +228,11 @@ local function bindParry(character)
             end
 
             
-            local leadAge = positionFresh and (t - Sync.positionAt) or 0
-            local leadB = spd * leadAge
-            local parryRad = math.max(P.DEFLECT_R + leadB + resRadiusBonus(), P.RAD_FLOOR)
+            local tickMs = (GameInfo.frameEMA() > 0 and GameInfo.frameEMA() * 1000) or 16.67
+            local leadSec = P.LEAD_PING_FLOOR + (P.LEAD_TICK_FRAMES * tickMs / 1000)
+            local leadB = math.min(spd * leadSec, P.LEAD_CAP)
+            local pbStuds = math.min(GameInfo.preBufferStuds(spd), P.PRE_CAP)
+            local parryRad = math.max(P.DEFLECT_R + leadB + pbStuds + resRadiusBonus(), P.RAD_FLOOR)
             local dx, dy, dz = hrp.Position.X - bp.X, hrp.Position.Y - bp.Y, hrp.Position.Z - bp.Z
             if dx*dx + dy*dy + dz*dz > parryRad * parryRad then return end
 
