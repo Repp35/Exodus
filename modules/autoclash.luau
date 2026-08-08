@@ -546,8 +546,18 @@ local function hookPlayer(player)
     if not player or player == Utils.getLocalPlayer() then return end
     if _antidashHooked[player] then return end
     _antidashHooked[player] = true
+    -- FIX: rastreia conexões por character pra desconectar no próximo respawn
+    local charConns = {}
     local function attach(char)
         if not char then return end
+        -- limpa conexões do character anterior (evita duplicação em respawn)
+        for i = #charConns, 1, -1 do
+            local c = charConns[i]
+            charConns[i] = nil
+            if c and type(c.Disconnect) == "function" then
+                pcall(function() c:Disconnect() end)
+            end
+        end
         local hum = char:FindFirstChildOfClass("Humanoid")
         if not hum then return end
         local anim = hum:FindFirstChildOfClass("Animator") or hum:WaitForChild("Animator", 5)
@@ -558,9 +568,11 @@ local function hookPlayer(player)
                 break
             end
         end
-        Utils.track(anim.AnimationPlayed:Connect(function(tr)
+        local animConn = anim.AnimationPlayed:Connect(function(tr)
             if isDashTrack(tr) then reportDash(player) end
-        end))
+        end)
+        charConns[#charConns + 1] = animConn
+        Utils.track(animConn)
     end
     if player.Character then attach(player.Character) end
     Utils.track(player.CharacterAdded:Connect(attach))
