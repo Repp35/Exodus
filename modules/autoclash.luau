@@ -9,7 +9,7 @@ local GameInfo, Utils, AutoParry
 local C = {
     MAX_HOLD             = 1.4,
 
-    
+
     MAINT_HOLD_MIN       = 0.060,   
     MAINT_BALL_RADIUS    = 25,      
     MAINT_TIMP_MAX       = 0.30,    
@@ -18,7 +18,7 @@ local C = {
     MAINT_BALL_GONE_DIST = 60,      
     MAINT_DEAD_DIST      = 80,      
 
-    
+
     DEACT_TIMP_EMA       = 0.18,    
     DEACT_SUSTAIN        = 0.25,    
     DEACT_MARGIN         = 0.10,    
@@ -26,35 +26,35 @@ local C = {
     DEACT_BALL_APPROACH_DOT = 0.25, 
     DEACT_BALL_FAR       = 15,      
 
-    
+
     ACT_HARD_CAP         = 22,      
     ACT_TIMP_FAST        = 0.060,
 
-    
+
     INV_DIST_CAP         = 25,
     INV_APPROACH_SPD_MIN = 50,
 
-    
-    DET_RAD_MIN = 10, DET_RAD_MAX = 25, DET_RAD_SPD_REF = 120,
+
+    DET_RAD_MIN = 14, DET_RAD_MAX = 32, DET_RAD_SPD_REF = 120,
     DET_DOT_EMA = 0.25, DET_DOT_THRESH = 0.20,
-    DET_RETURN_FACTOR = 1.5, DET_TIMEOUT = 0.8,
+    DET_RETURN_FACTOR = 2.2, DET_TIMEOUT = 1.1,
     DET_REQUIRE_INSIDE = true,      
 
-    
+
     ANTIDASH_RAD_MIN    = 20, ANTIDASH_RAD_MAX = 32,
     ANTIDASH_DOT_MIN    = 0.35,     
     ANTIDASH_PANIC_HOLD = 0.45,
     ANTIDASH_PANIC_MAX  = 1.2,
     ANTIDASH_COOLDOWN   = 0.35,
 
-    
+
     DASH_SPD_THRESH   = 50, DASH_SPD_CONFIRM = 62,
     DASH_DUR_MIN      = 0.08, DASH_DUR_MAX = 0.5,
     DASH_PANIC_DOT    = 0.85, DASH_PANIC_DIST = 14,
     DASH_PANIC_WINDOW = 0.300,
     DASH_TRACK_INTERVAL = 0.2, PLAYER_SCAN_RADIUS = 100,
 
-    
+
     CPS_WIN = 1.0, RING_FRESH_MAX = 0.6,
 }
 local RING_BUF = 8
@@ -65,17 +65,17 @@ local S = {
     lastTarget = -999, lastTargetAt = 0,
     targetRing = table.create(RING_BUF, 0), targetRingIdx = 0, targetCps = 0,
 
-    
+
     clashOn = false, clashAt = 0,
     tImpEma        = 0,
     tImpHighSince  = 0,
     ballGoneSince  = 0,
 
-    
+
     detPhase = "IDLE", detEnterAt = 0, detEntryTime = 0, detExitAt = 0,
     detDotEma = 0, detWasInside = false, detSignal = false,
 
-    
+
     dashEvents = {}, dashPanicUntil = 0,
     dashAnti = { untilT = 0 },
 }
@@ -137,7 +137,7 @@ local function invisibleGate(ctx, hr)
     if not (ctx and ctx.targeted) then return false end
     if ctx.bDist > C.INV_DIST_CAP then return false end
     if ctx.spd < C.INV_APPROACH_SPD_MIN then return false end
-    
+
     if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
         local d = ballApproachDot(ctx.ball, hr)
         if d < C.ANTIDASH_DOT_MIN then return false end
@@ -290,17 +290,17 @@ local function shouldMaintain(t, ctx)
     if not ctx then return false end
     if ctx.bDist > C.MAINT_BALL_GONE_DIST then return false end
 
-    
+
     if ctx.bDist <= C.MAINT_BALL_RADIUS then return true end
 
-    
+
     local spd = ctx.spd or 0
     if ctx.tImp > 0 and ctx.tImp <= maintTimpMax(spd) then return true end
 
-    
+
     if ctx.targeted or recentlyTargeted(t) then return true end
 
-    
+
     local ap = AutoParry and AutoParry.getState and AutoParry.getState() or nil
     if ap and ap.firedAt and (t - ap.firedAt) < C.MAINT_PARRY_KEEP then return true end
 
@@ -315,7 +315,7 @@ end
 local function shouldDeactivate(t, ctx, hr)
     if not ctx then return false end  
 
-    
+
     if ctx.bDist > C.MAINT_DEAD_DIST then
         if S.ballGoneSince == 0 then S.ballGoneSince = t end
         if (t - S.ballGoneSince) >= C.DEACT_HARD_GONE_T then return true end
@@ -326,12 +326,12 @@ local function shouldDeactivate(t, ctx, hr)
     local spd = ctx.spd or 0
     if spd < 1 then return false end  
 
-    
+
     local alpha = math.min(t - S.clashAt, C.DEACT_TIMP_EMA) / C.DEACT_TIMP_EMA
     if alpha < 0 then alpha = 0 end
     if alpha > 1 then alpha = 1 end
 
-    
+
     local raw = ctx.tImp
     if type(raw) ~= "number" or raw ~= raw then raw = deactTimpMax(spd) end
     if raw == math.huge then raw = deactTimpMax(spd) * 2 end
@@ -339,11 +339,11 @@ local function shouldDeactivate(t, ctx, hr)
 
     S.tImpEma = S.tImpEma * (1 - alpha) + raw * alpha
 
-    
+
     local thresh   = deactTimpMax(spd)
     local threshH  = thresh + C.DEACT_MARGIN
 
-    
+
     if S.tImpEma > threshH and raw > threshH then
         if S.tImpHighSince == 0 then S.tImpHighSince = t end
         if (t - S.tImpHighSince) >= C.DEACT_SUSTAIN then
@@ -353,7 +353,7 @@ local function shouldDeactivate(t, ctx, hr)
         S.tImpHighSince = 0
     end
 
-    
+
     if ctx.bDist > C.DEACT_BALL_FAR and hr and hr.Parent and ctx.ball and ctx.ball.Parent then
         local dot = ballApproachDot(ctx.ball, hr)
         if dot < C.DEACT_BALL_APPROACH_DOT then
@@ -374,24 +374,24 @@ end
 local function shouldActivate(t, ctx, hr, targetJustChangedToMe)
     local targeted = ctx and ctx.targeted or isTargeted()
     if not targeted then
-        
+
         if S.dashAnti.untilT > t then return true end
         if S.dashPanicUntil > t then return true end
         return false
     end
 
-    
+
     if targetJustChangedToMe and ctx then
         if ctx.bDist <= C.ACT_HARD_CAP and ctx.tImp > 0 and ctx.tImp <= C.ACT_TIMP_FAST then
             return true
         end
     end
-    
+
     if S.detSignal then return true end
-    
+
     if S.dashAnti.untilT > t then return true end
     if S.dashPanicUntil > t then return true end
-    
+
     if invisibleGate(ctx, hr) then return true end
 
     return false
@@ -415,7 +415,7 @@ local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
         return
     end
 
-    
+
     if shouldActivate(t, ctx, hr, targetJustChangedToMe) then
         activateClash(t)
     end
@@ -524,7 +524,7 @@ local function reportDash(player)
     if dist > rad or dist < 0.1 then return end
     local ok, av = pcall(function() return php.AssemblyLinearVelocity end)
     if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return end
-    
+
     local dot = av.Unit:Dot(toMe.Unit)
     if dot < C.ANTIDASH_DOT_MIN then return end
     _antidashCooldown[player.UserId] = t
