@@ -43,6 +43,9 @@ local AP = {
     lastMissAt = 0,
 }
 
+-- conexões ativas (pra evitar vazamento de heartbeat a cada respawn)
+local _activeConns = {}
+
 -- estado res
 local RES = {
     stack = 0,
@@ -121,6 +124,17 @@ local function resetState()
     _lastTargetSeen = -999
 end
 
+-- desconecta todas as conexões ativas (anti-vazamento de heartbeat em respawn)
+local function disconnectAll()
+    for i = #_activeConns, 1, -1 do
+        local c = _activeConns[i]
+        _activeConns[i] = nil
+        if c and type(c.Disconnect) == "function" then
+            pcall(function() c:Disconnect() end)
+        end
+    end
+end
+
 -- sincronização da bola
 local function onBallSync(data)
     if typeof(data) ~= "table" then
@@ -158,6 +172,8 @@ end
 local function bindParry(character)
     _apBind = _apBind + 1
     local currentBindId = _apBind
+    -- FIX: desconecta heartbeats/conexões anteriores a cada respawn
+    disconnectAll()
     if not (character and character.Parent) then
         return
     end
@@ -168,8 +184,8 @@ local function bindParry(character)
     AP.fired, AP.armed = false, false
 
     -- heartbeat
-    Utils.trackCharacter(
-        Utils.getRunService().Heartbeat:Connect(
+    local heartbeatConn
+    heartbeatConn = Utils.getRunService().Heartbeat:Connect(
             function(dt)
                 if currentBindId ~= _apBind or not (character.Parent and hrp.Parent) then
                     return
@@ -248,17 +264,18 @@ local function bindParry(character)
                 end
             end
         )
-    )
+    _activeConns[#_activeConns + 1] = heartbeatConn
+    Utils.trackCharacter(heartbeatConn)
     -- ancestry
-    Utils.trackCharacter(
-        character.AncestryChanged:Connect(
+    local ancestryConn = character.AncestryChanged:Connect(
             function(_, parent)
                 if not parent then
                     _apBind = _apBind + 1
                 end
             end
         )
-    )
+    _activeConns[#_activeConns + 1] = ancestryConn
+    Utils.trackCharacter(ancestryConn)
 end
 
 -- setup
