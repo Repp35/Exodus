@@ -27,15 +27,14 @@ local C = {
     DEACT_RAD_MAX        = 30,
 
 
-    ACT_HARD_CAP         = 22,
-    ACT_TIMP_FAST        = 0.050,
+    ACT_TIMP_FAST        = 0.090,
 
 
     INV_DIST_CAP         = 25,
     INV_APPROACH_SPD_MIN = 50,
 
 
-    DET_RAD_MIN = 14, DET_RAD_MAX = 32, DET_RAD_SPD_REF = 120,
+    DET_RAD_MIN = 15, DET_RAD_MAX = 35, DET_RAD_SPD_REF = 120,
     DET_DOT_EMA = 0.10, DET_DOT_THRESH = 0.15,
     DET_RETURN_FACTOR = 2.2, DET_TIMEOUT = 0.8,
     DET_REQUIRE_INSIDE = true,
@@ -212,7 +211,10 @@ end
 
 local function getDetectorRadius(spd)
     local k = math.clamp((spd or 0) / C.DET_RAD_SPD_REF, 0, 1)
-    return C.DET_RAD_MIN + (C.DET_RAD_MAX - C.DET_RAD_MIN) * k
+    local base = C.DET_RAD_MIN + (C.DET_RAD_MAX - C.DET_RAD_MIN) * k
+    local p = getP()
+    local parryFloor = (p and p.DEFLECT_R or 0) + parryBonus() + 5
+    return math.max(base, parryFloor)
 end
 
 local function tickReturnDetector(t, hr, ball)
@@ -280,7 +282,6 @@ local function clearClash()
     S.tImpEma, S.tImpHighSince = 0, 0
     S.ballGoneSince = 0
     S._deactLastT = nil
-    S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt, S.detWasInside = "IDLE", 0, 0, 0, false
     _ctxCache.valid = false
 end
 
@@ -328,9 +329,16 @@ end
 
 
 
+local function isBallApproaching(hrp, ball)
+    local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+    if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return true end
+    local toMe = hrp.Position - ball.Position
+    if toMe.Magnitude < 1 then return true end
+    return av:Dot(toMe.Unit) > 0.25
+end
+
 local function shouldDeactivate(t, ctx, hr)
     if not ctx then return false end
-
 
     if ctx.bDist > C.MAINT_DEAD_DIST then
         if S.ballGoneSince == 0 then S.ballGoneSince = t end
@@ -340,48 +348,14 @@ local function shouldDeactivate(t, ctx, hr)
     end
 
     local spd = ctx.spd or 0
-    if spd < 1 then return false end
 
+    local p = getP()
+    local deactRad = math.clamp((p and p.DEFLECT_R or 0) + parryBonus(), C.DEACT_RAD_MIN, C.DEACT_RAD_MAX)
 
-    local raw = ctx.tImp
-    if type(raw) ~= "number" or raw ~= raw then raw = deactTimpMax(spd) end
-    if raw == math.huge then raw = deactTimpMax(spd) * 2 end
-    if raw < 0 then raw = 0 end
-
-    local thresh  = deactTimpMax(spd)
-    local threshH = thresh + C.DEACT_MARGIN
-
-
-    if raw < thresh then
-        S.tImpHighSince = 0
-        return false
-    end
-
-
-    local dt = math.max(t - (S._deactLastT or t), 0)
-    S._deactLastT = t
-    local alpha = 1 - math.exp(-dt / C.DEACT_TIMP_EMA)
-    S.tImpEma = S.tImpEma * (1 - alpha) + raw * alpha
-
-
-    if S.tImpEma > threshH and raw > threshH then
-        if S.tImpHighSince == 0 then S.tImpHighSince = t end
-        if (t - S.tImpHighSince) >= C.DEACT_SUSTAIN then
-            return true
-        end
-    else
-        S.tImpHighSince = 0
-    end
-
-
+    if ctx.bDist > deactRad then return true end
+    if ctx.tImp > deactTimpMax(spd) then return true end
     if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
-        local p = getP()
-        local deactRad = math.clamp((p and p.DEFLECT_R or 0) + parryBonus(), C.DEACT_RAD_MIN, C.DEACT_RAD_MAX)
-        if ctx.bDist > deactRad then
-            if ballApproachDot(ctx.ball, hr) < 0.25 then
-                return true
-            end
-        end
+        if not isBallApproaching(hr, ctx.ball) and ctx.bDist > deactRad * 0.7 then return true end
     end
 
     return false
@@ -405,7 +379,9 @@ local function shouldActivate(t, ctx, hr, targetJustChangedToMe)
 
 
     if targetJustChangedToMe and ctx then
-        if ctx.bDist <= C.ACT_HARD_CAP and ctx.tImp > 0 and ctx.tImp <= C.ACT_TIMP_FAST then
+        local p = getP()
+        local actRad = math.clamp((p and p.DEFLECT_R or 0) + parryBonus(), C.DEACT_RAD_MIN, C.DEACT_RAD_MAX)
+        if ctx.bDist <= actRad and ctx.tImp > 0 and ctx.tImp <= C.ACT_TIMP_FAST then
             return true
         end
     end
