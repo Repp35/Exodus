@@ -19,11 +19,10 @@ local C = {
     MAINT_DEAD_DIST      = 80,      
 
 
-    DEACT_TIMP_EMA       = 0.18,    
-    DEACT_SUSTAIN        = 0.25,    
-    DEACT_MARGIN         = 0.10,    
+    DEACT_TIMP_EMA       = 0.10,    
+    DEACT_SUSTAIN        = 0.08,    
+    DEACT_MARGIN         = 0.05,    
     DEACT_HARD_GONE_T    = 0.20,    
-    DEACT_BALL_APPROACH_DOT = 0.25, 
 
 
     ACT_HARD_CAP         = 22,      
@@ -250,6 +249,7 @@ local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.tImpEma, S.tImpHighSince = 0, 0
     S.ballGoneSince = 0
+    S._deactLastT = nil
     _ctxCache.valid = false
 end
 
@@ -259,6 +259,7 @@ local function activateClash(t)
     S.tImpEma       = 0
     S.tImpHighSince = 0
     S.ballGoneSince = 0
+    S._deactLastT   = t
     _ctxCache.valid = false
 end
 
@@ -297,7 +298,7 @@ end
 
 
 local function shouldDeactivate(t, ctx, hr)
-    if not ctx then return false end  
+    if not ctx then return false end
 
 
     if ctx.bDist > C.MAINT_DEAD_DIST then
@@ -308,12 +309,7 @@ local function shouldDeactivate(t, ctx, hr)
     end
 
     local spd = ctx.spd or 0
-    if spd < 1 then return false end  
-
-
-    local alpha = math.min(t - S.clashAt, C.DEACT_TIMP_EMA) / C.DEACT_TIMP_EMA
-    if alpha < 0 then alpha = 0 end
-    if alpha > 1 then alpha = 1 end
+    if spd < 1 then return false end
 
 
     local raw = ctx.tImp
@@ -321,11 +317,20 @@ local function shouldDeactivate(t, ctx, hr)
     if raw == math.huge then raw = deactTimpMax(spd) * 2 end
     if raw < 0 then raw = 0 end
 
+    local thresh  = deactTimpMax(spd)
+    local threshH = thresh + C.DEACT_MARGIN
+
+
+    if raw < thresh then
+        S.tImpHighSince = 0
+        return false
+    end
+
+
+    local dt = math.max(t - (S._deactLastT or t), 0)
+    S._deactLastT = t
+    local alpha = 1 - math.exp(-dt / C.DEACT_TIMP_EMA)
     S.tImpEma = S.tImpEma * (1 - alpha) + raw * alpha
-
-
-    local thresh   = deactTimpMax(spd)
-    local threshH  = thresh + C.DEACT_MARGIN
 
 
     if S.tImpEma > threshH and raw > threshH then
@@ -335,18 +340,6 @@ local function shouldDeactivate(t, ctx, hr)
         end
     else
         S.tImpHighSince = 0
-    end
-
-
-    if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
-        local p = getP()
-        local parryRad = math.clamp((p and p.DEFLECT_R or 0) + parryBonus(), 15, C.ANTIDASH_RAD_MAX)
-        if ctx.bDist > parryRad then
-            local dot = ballApproachDot(ctx.ball, hr)
-            if dot < C.DEACT_BALL_APPROACH_DOT then
-                return true
-            end
-        end
     end
 
     return false
@@ -608,6 +601,7 @@ function AutoClash.resetState()
     S.tImpEma = 0
     S.tImpHighSince = 0
     S.ballGoneSince = 0
+    S._deactLastT = nil
     S.detDotEma, S.detSignal = 0, false
     table.clear(S.dashEvents)
     S.dashPanicUntil, S.dashAnti = 0, { untilT = 0 }
