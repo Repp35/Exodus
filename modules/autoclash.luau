@@ -24,11 +24,10 @@ local C = {
     DEACT_MARGIN         = 0.10,    
     DEACT_HARD_GONE_T    = 0.20,    
     DEACT_BALL_APPROACH_DOT = 0.25, 
-    DEACT_BALL_FAR       = 15,      
 
 
     ACT_HARD_CAP         = 22,      
-    ACT_TIMP_FAST        = 0.060,
+    ACT_TIMP_FAST        = 0.085,
 
 
     INV_DIST_CAP         = 25,
@@ -36,7 +35,7 @@ local C = {
 
 
     DET_RAD_MIN = 14, DET_RAD_MAX = 32, DET_RAD_SPD_REF = 120,
-    DET_DOT_EMA = 0.25, DET_DOT_THRESH = 0.20,
+    DET_DOT_EMA = 0.25, DET_DOT_THRESH = 0.15,
     DET_RETURN_FACTOR = 2.2, DET_TIMEOUT = 1.1,
     DET_REQUIRE_INSIDE = true,      
 
@@ -72,8 +71,7 @@ local S = {
     ballGoneSince  = 0,
 
 
-    detPhase = "IDLE", detEnterAt = 0, detEntryTime = 0, detExitAt = 0,
-    detDotEma = 0, detWasInside = false, detSignal = false,
+    detDotEma = 0, detSignal = false,
 
 
     dashEvents = {}, dashPanicUntil = 0,
@@ -217,7 +215,7 @@ end
 local function tickReturnDetector(t, hr, ball)
     S.detSignal = false
     if not (hr and hr.Parent and ball and ball.Parent) then
-        S.detPhase, S.detDotEma, S.detWasInside = "IDLE", 0, false
+        S.detDotEma = 0
         return
     end
     local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
@@ -228,37 +226,23 @@ local function tickReturnDetector(t, hr, ball)
     local dotRaw = av:Dot(toMe.Unit)
     local radius = getDetectorRadius(spd)
 
+    -- EMA só acumula dentro do alcance (com folga 1.2x); fora zera.
     if dist <= radius * 1.2 then
         S.detDotEma = S.detDotEma * (1 - C.DET_DOT_EMA) + dotRaw * C.DET_DOT_EMA
     else
         S.detDotEma = 0
     end
-    local isInside  = dist <= radius
-    local dotComing = S.detDotEma >  C.DET_DOT_THRESH
-    local dotGoing  = S.detDotEma < -C.DET_DOT_THRESH
 
-    if S.detPhase == "EXITED" and (t - S.detExitAt) > C.DET_TIMEOUT then
-        S.detPhase = "IDLE"
-    end
-
-    if S.detPhase == "IDLE" then
-        if C.DET_REQUIRE_INSIDE and isInside and (not S.detWasInside or dotComing) then
-            local et = dist > 0.1 and (dist / spd) or 0.01
-            S.detPhase, S.detEnterAt, S.detEntryTime = "INSIDE", t, et
+    -- Sem fases. Dentro do raio + EMA do dot acima do thresh → sinaliza.
+    if C.DET_REQUIRE_INSIDE then
+        if dist <= radius and S.detDotEma > C.DET_DOT_THRESH then
+            S.detSignal = true
         end
-    elseif S.detPhase == "INSIDE" then
-        if (not isInside and S.detWasInside) or (isInside and dotGoing) then
-            S.detPhase, S.detExitAt = "EXITED", t
-        end
-    elseif S.detPhase == "EXITED" then
-        local lim = S.detEntryTime * C.DET_RETURN_FACTOR
-        if isInside then
-            if lim > 0 and (t - S.detExitAt) <= lim then S.detSignal = true end
-            local et = dist > 0.1 and (dist / spd) or 0.01
-            S.detPhase, S.detEnterAt, S.detEntryTime = "INSIDE", t, et
+    else
+        if S.detDotEma > C.DET_DOT_THRESH then
+            S.detSignal = true
         end
     end
-    S.detWasInside = isInside
 end
 
 
@@ -354,10 +338,14 @@ local function shouldDeactivate(t, ctx, hr)
     end
 
 
-    if ctx.bDist > C.DEACT_BALL_FAR and hr and hr.Parent and ctx.ball and ctx.ball.Parent then
-        local dot = ballApproachDot(ctx.ball, hr)
-        if dot < C.DEACT_BALL_APPROACH_DOT then
-            return true
+    if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
+        local p = getP()
+        local parryRad = math.clamp((p and p.DEFLECT_R or 0) + parryBonus(), 15, C.ANTIDASH_RAD_MAX)
+        if ctx.bDist > parryRad then
+            local dot = ballApproachDot(ctx.ball, hr)
+            if dot < C.DEACT_BALL_APPROACH_DOT then
+                return true
+            end
         end
     end
 
@@ -620,8 +608,7 @@ function AutoClash.resetState()
     S.tImpEma = 0
     S.tImpHighSince = 0
     S.ballGoneSince = 0
-    S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt = "IDLE", 0, 0, 0
-    S.detDotEma, S.detWasInside, S.detSignal = 0, false, false
+    S.detDotEma, S.detSignal = 0, false
     table.clear(S.dashEvents)
     S.dashPanicUntil, S.dashAnti = 0, { untilT = 0 }
     _ctxCache.valid = false
