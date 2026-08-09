@@ -14,6 +14,7 @@ local P = {
     FIRE_TIMEOUT = 2.0,
     MIN_SPD = 3,
     DEFLECT_R = 8.5,
+    RAD_FLOOR = 14,
     LEAD_CAP = 80,
     PRE_CAP = 30,
     PB_WEIGHT = 1.0,
@@ -221,8 +222,11 @@ local function bindParry(character)
                     return
                 end
 
-                -- raio puro: sem lead, sem pre-buffer, sem piso. só DEFLECT_R + res.
-                local parryRad = P.DEFLECT_R + resRadiusBonus()
+                -- lead simples baseado na velocidade e num piso (sem subsistema de ping)
+                local leadSec = 0.060
+                local leadB = math.min(spd * leadSec, P.LEAD_CAP)
+                local pbStuds = math.min(spd * 0.05, P.PRE_CAP) -- pre-buffer leve baseado em spd
+                local parryRad = math.max(P.DEFLECT_R + leadB + pbStuds + resRadiusBonus(), P.RAD_FLOOR)
 
                 local dx = hrp.Position.X - bp.X
                 local dy = hrp.Position.Y - bp.Y
