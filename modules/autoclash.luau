@@ -35,7 +35,7 @@ local C = {
 
 
     DET_RAD_MIN = 15, DET_RAD_MAX = 35, DET_RAD_SPD_REF = 120,
-    DET_DOT_EMA = 0.10, DET_DOT_THRESH = 0.15,
+    DET_DOT_EMA = 0.10, DET_DOT_THRESH = 0.30,
     DET_RETURN_FACTOR = 2.2, DET_TIMEOUT = 0.8,
     DET_REQUIRE_INSIDE = true,
 
@@ -348,15 +348,14 @@ local function shouldDeactivate(t, ctx, hr)
     end
 
     local spd = ctx.spd or 0
+    if spd < 1 then return false end
 
     local p = getP()
-    local deactRad = math.clamp((p and p.DEFLECT_R or 0) + parryBonus(), C.DEACT_RAD_MIN, C.DEACT_RAD_MAX)
+    local deactRad = math.clamp((p and p.DEFLECT_R or 0) + parryBonus(), 18, 30)
 
     if ctx.bDist > deactRad then return true end
-    if ctx.tImp > deactTimpMax(spd) then return true end
-    if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
-        if not isBallApproaching(hr, ctx.ball) and ctx.bDist > deactRad * 0.7 then return true end
-    end
+
+    if ctx.tImp > deactTimpMax(spd) and ctx.bDist > deactRad * 0.6 then return true end
 
     return false
 end
