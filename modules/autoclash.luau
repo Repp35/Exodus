@@ -19,14 +19,16 @@ local C = {
     MAINT_DEAD_DIST      = 80,      
 
 
-    DEACT_TIMP_EMA       = 0.10,    
-    DEACT_SUSTAIN        = 0.08,    
-    DEACT_MARGIN         = 0.05,    
-    DEACT_HARD_GONE_T    = 0.20,    
+    DEACT_TIMP_EMA       = 0.10,
+    DEACT_SUSTAIN        = 0.08,
+    DEACT_MARGIN         = 0.05,
+    DEACT_HARD_GONE_T    = 0.20,
+    DEACT_RAD_MIN        = 18,
+    DEACT_RAD_MAX        = 30,
 
 
-    ACT_HARD_CAP         = 22,      
-    ACT_TIMP_FAST        = 0.085,
+    ACT_HARD_CAP         = 22,
+    ACT_TIMP_FAST        = 0.050,
 
 
     INV_DIST_CAP         = 25,
@@ -34,9 +36,9 @@ local C = {
 
 
     DET_RAD_MIN = 14, DET_RAD_MAX = 32, DET_RAD_SPD_REF = 120,
-    DET_DOT_EMA = 0.25, DET_DOT_THRESH = 0.15,
-    DET_RETURN_FACTOR = 2.2, DET_TIMEOUT = 1.1,
-    DET_REQUIRE_INSIDE = true,      
+    DET_DOT_EMA = 0.10, DET_DOT_THRESH = 0.15,
+    DET_RETURN_FACTOR = 2.2, DET_TIMEOUT = 0.8,
+    DET_REQUIRE_INSIDE = true,
 
 
     ANTIDASH_RAD_MIN    = 20, ANTIDASH_RAD_MAX = 32,
@@ -71,6 +73,8 @@ local S = {
 
 
     detDotEma = 0, detSignal = false,
+    detPhase = "IDLE", detEnterAt = 0, detEntryTime = 0, detExitAt = 0,
+    detWasInside = false,
 
 
     dashEvents = {}, dashPanicUntil = 0,
@@ -214,34 +218,60 @@ end
 local function tickReturnDetector(t, hr, ball)
     S.detSignal = false
     if not (hr and hr.Parent and ball and ball.Parent) then
-        S.detDotEma = 0
+        S.detPhase, S.detDotEma, S.detWasInside = "IDLE", 0, false
         return
     end
     local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
     if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return end
-    local spd, toMe = av.Magnitude, hr.Position - ball.Position
-    local dist = toMe.Magnitude
+    local spd    = av.Magnitude
+    local radius = getDetectorRadius(spd)
+    local toMe   = hr.Position - ball.Position
+    local dist   = toMe.Magnitude
     if dist < 0.001 then return end
     local dotRaw = av:Dot(toMe.Unit)
-    local radius = getDetectorRadius(spd)
 
-    -- EMA só acumula dentro do alcance (com folga 1.2x); fora zera.
+
     if dist <= radius * 1.2 then
         S.detDotEma = S.detDotEma * (1 - C.DET_DOT_EMA) + dotRaw * C.DET_DOT_EMA
     else
         S.detDotEma = 0
     end
 
-    -- Sem fases. Dentro do raio + EMA do dot acima do thresh → sinaliza.
-    if C.DET_REQUIRE_INSIDE then
-        if dist <= radius and S.detDotEma > C.DET_DOT_THRESH then
-            S.detSignal = true
+
+    local isInside  = dist <= radius
+    local dotComing = S.detDotEma >  C.DET_DOT_THRESH
+    local dotGoing  = S.detDotEma < -C.DET_DOT_THRESH
+
+
+    if S.detPhase == "EXITED" and (t - S.detExitAt) > C.DET_TIMEOUT then
+        S.detPhase = "IDLE"
+    end
+
+    if S.detPhase == "IDLE" then
+        if (isInside and not S.detWasInside) or (not isInside and dotComing) then
+            local entryTime = dist > 0.1 and (dist / spd) or 0.01
+            S.detPhase     = "INSIDE"
+            S.detEnterAt   = t
+            S.detEntryTime = entryTime
         end
-    else
-        if S.detDotEma > C.DET_DOT_THRESH then
-            S.detSignal = true
+    elseif S.detPhase == "INSIDE" then
+        if (not isInside and S.detWasInside) or (isInside and dotGoing) then
+            S.detPhase  = "EXITED"
+            S.detExitAt = t
+        end
+    elseif S.detPhase == "EXITED" then
+        local delta  = t - S.detExitAt
+        local limiar = S.detEntryTime * C.DET_RETURN_FACTOR
+        if (isInside and not S.detWasInside) or dotComing then
+            if delta <= limiar and dotComing then S.detSignal = true end
+            local entryTime = dist > 0.1 and (dist / spd) or 0.01
+            S.detPhase     = "INSIDE"
+            S.detEnterAt   = t
+            S.detEntryTime = entryTime
         end
     end
+
+    S.detWasInside = isInside
 end
 
 
@@ -250,6 +280,7 @@ local function clearClash()
     S.tImpEma, S.tImpHighSince = 0, 0
     S.ballGoneSince = 0
     S._deactLastT = nil
+    S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt, S.detWasInside = "IDLE", 0, 0, 0, false
     _ctxCache.valid = false
 end
 
@@ -340,6 +371,17 @@ local function shouldDeactivate(t, ctx, hr)
         end
     else
         S.tImpHighSince = 0
+    end
+
+
+    if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
+        local p = getP()
+        local deactRad = math.clamp((p and p.DEFLECT_R or 0) + parryBonus(), C.DEACT_RAD_MIN, C.DEACT_RAD_MAX)
+        if ctx.bDist > deactRad then
+            if ballApproachDot(ctx.ball, hr) < 0.25 then
+                return true
+            end
+        end
     end
 
     return false
@@ -603,6 +645,7 @@ function AutoClash.resetState()
     S.ballGoneSince = 0
     S._deactLastT = nil
     S.detDotEma, S.detSignal = 0, false
+    S.detPhase, S.detEnterAt, S.detEntryTime, S.detExitAt, S.detWasInside = "IDLE", 0, 0, 0, false
     table.clear(S.dashEvents)
     S.dashPanicUntil, S.dashAnti = 0, { untilT = 0 }
     _ctxCache.valid = false
