@@ -4,82 +4,65 @@ local AutoClash = {}
 
 local GameInfo, Utils, AutoParry
 
-
 -- tuning
 local C = {
     MAX_HOLD             = 1.4,
 
-
-    MAINT_HOLD_MIN       = 0.060,   
-    MAINT_BALL_RADIUS    = 25,      
-    MAINT_TIMP_MAX       = 0.30,    
-    MAINT_PARRY_KEEP     = 0.10,    
-    MAINT_TARGET_KEEP    = 0.15,    
-    MAINT_BALL_GONE_DIST = 60,      
-    MAINT_DEAD_DIST      = 80,      
-
+    MAINT_HOLD_MIN       = 0.060,
+    MAINT_BALL_RADIUS    = 25,
+    MAINT_TIMP_MAX       = 0.30,
+    MAINT_PARRY_KEEP     = 0.10,
+    MAINT_TARGET_KEEP    = 0.15,
+    MAINT_BALL_GONE_DIST = 60,
+    MAINT_DEAD_DIST      = 80,
 
     DEACT_HARD_GONE_T    = 0.20,
-
 
     ACT_HARD_CAP         = 22,
     ACT_TIMP_FAST        = 0.085,
 
+    TRAJ_INV_MIN_TRAVEL  = 1.2,
+    TRAJ_INV_RATIO_MAX   = 0.4,
+    TRAJ_DIST_FLOOR      = 0.05,
+    TRAJ_RAD_FLOOR       = 18,
+    TRAJ_RAD_CEIL        = 45,
+    TRAJ_RAD_SPD_K       = 0.15,
+    TRAJ_DEACT_WIN_T     = 0.12,
+    TRAJ_DEACT_RATIO_MIN = 0.35,
 
-    INV_DIST_CAP         = 25,
-    INV_APPROACH_SPD_MIN = 50,
+    ANTIDASH_RAD_MIN     = 20, ANTIDASH_RAD_MAX = 32,
+    ANTIDASH_DOT_MIN     = 0.35,
+    ANTIDASH_PANIC_HOLD  = 0.45,
+    ANTIDASH_PANIC_MAX   = 1.2,
+    ANTIDASH_COOLDOWN    = 0.35,
 
-
-    -- trajectory detector (tempo de inversão vs esperado)
-    TRAJ_INV_MIN_TRAVEL  = 0.5,    -- stud mínimo que a bola precisa ter subido pra contar como return real
-    TRAJ_INV_RATIO_MAX   = 0.55,   -- dtInv / expectedTime. < 0.55 = mais rápido que o fisicamente possível
-    TRAJ_DIST_FLOOR      = 0.05,   -- filtro de ruído
-    TRAJ_RAD_FLOOR       = 18,     -- piso do raio de monitoramento
-    TRAJ_RAD_CEIL        = 45,     -- teto
-    TRAJ_RAD_SPD_K       = 0.15,   -- studs por unidade de velocidade
-    TRAJ_DEACT_RISE_T    = 0.10,   -- segundos subindo consistente antes de desativar
-    TRAJ_DEACT_TRAVEL_MIN = 1.0,   -- stud mínimo afastado pra confirmar desativação
-
-
-    ANTIDASH_RAD_MIN    = 20, ANTIDASH_RAD_MAX = 32,
-    ANTIDASH_DOT_MIN    = 0.35,
-    ANTIDASH_PANIC_HOLD = 0.45,
-    ANTIDASH_PANIC_MAX  = 1.2,
-    ANTIDASH_COOLDOWN   = 0.35,
-
-
-    DASH_SPD_THRESH   = 50, DASH_SPD_CONFIRM = 62,
-    DASH_DUR_MIN      = 0.08, DASH_DUR_MAX = 0.5,
-    DASH_PANIC_DOT    = 0.85, DASH_PANIC_DIST = 14,
-    DASH_PANIC_WINDOW = 0.300,
-    DASH_TRACK_INTERVAL = 0.2, PLAYER_SCAN_RADIUS = 100,
-
+    DASH_SPD_THRESH      = 50, DASH_SPD_CONFIRM = 62,
+    DASH_DUR_MIN         = 0.08, DASH_DUR_MAX = 0.5,
+    DASH_PANIC_DOT       = 0.85, DASH_PANIC_DIST = 14,
+    DASH_PANIC_WINDOW    = 0.300,
+    DASH_TRACK_INTERVAL  = 0.2, PLAYER_SCAN_RADIUS = 100,
 
     CPS_WIN = 1.0, RING_FRESH_MAX = 0.6,
 }
 local RING_BUF = 8
-
 
 -- state
 local S = {
     lastTarget = -999, lastTargetAt = 0,
     targetRing = table.create(RING_BUF, 0), targetRingIdx = 0, targetCps = 0,
 
-
     clashOn = false, clashAt = 0,
-    ballGoneSince  = 0,
+    ballGoneSince = 0,
 
-
-    -- trajectory detector state
     prevDist      = nil,
-    maxSinceLast  = nil,
     atPeak        = nil,
     peakDist      = nil,
     derivSign     = 0,
     risingSince   = nil,
-    detRadius     = 0,
+    riseIntegral  = 0,
+    riseWinStart  = nil,
+    riseWinSpdMax = 0,
     detSignal     = false,
-
 
     dashEvents = {}, dashPanicUntil = 0,
     dashAnti = { untilT = 0 },
@@ -89,7 +72,7 @@ local _localUserId = -1
 local _antidashCooldown, _antidashHooked, _lastDashTrack = {}, {}, 0
 local _ctxCache = { t = 0, valid = false }
 local SNAPSHOT_TTL = 0.05
-
+local _detRadius = 0
 
 local function getP()
     return AutoParry and AutoParry.getP and AutoParry.getP() or nil
@@ -114,19 +97,11 @@ local function recentlyTargeted(t)
     return (t - S.lastTargetAt) < C.MAINT_TARGET_KEEP
 end
 
-
 local function maintTimpMax(spd)
     if spd < 1 then return C.MAINT_TIMP_MAX end
     local s = math.clamp(60 / spd, 0.2, 2.5)
     return math.clamp(C.MAINT_TIMP_MAX * s, 0.06, 0.40)
 end
-
-local function deactTimpMax(spd)
-    if spd < 1 then return C.MAINT_TIMP_MAX end
-    local s = math.clamp(60 / spd, 0.2, 2.5)
-    return math.clamp(C.MAINT_TIMP_MAX * s, 0.08, 0.40)
-end
-
 
 local function ballApproachDot(ball, hr)
     if not (ball and ball.Parent and hr and hr.Parent) then return 0 end
@@ -137,20 +112,7 @@ local function ballApproachDot(ball, hr)
     return av:Dot(toMe.Unit)
 end
 
-
-local function invisibleGate(ctx, hr)
-    if not (ctx and ctx.targeted) then return false end
-    if ctx.bDist > C.INV_DIST_CAP then return false end
-    if ctx.spd < C.INV_APPROACH_SPD_MIN then return false end
-
-    if hr and hr.Parent and ctx.ball and ctx.ball.Parent then
-        local d = ballApproachDot(ctx.ball, hr)
-        if d < C.ANTIDASH_DOT_MIN then return false end
-    end
-    return true
-end
-
-
+-- target ring
 local function ringPush(t)
     S.targetRingIdx = (S.targetRingIdx % RING_BUF) + 1
     S.targetRing[S.targetRingIdx] = t
@@ -165,7 +127,6 @@ local function updateTargetCps(t)
     end
     S.targetCps = cnt / C.CPS_WIN
 end
-
 
 -- snapshot
 local function clashSnapshot()
@@ -209,28 +170,25 @@ local function clashSnapshot()
     return _ctxCache
 end
 
-
-
-
-
-
-local function getDetectorRadius(spd)
-    local k = math.clamp((spd or 0) / C.DET_RAD_SPD_REF, 0, 1)
-    return C.DET_RAD_MIN + (C.DET_RAD_MAX - C.DET_RAD_MIN) * k
+-- trajectory detector
+local function resetTrajState()
+    S.prevDist, S.atPeak, S.peakDist = nil, nil, nil
+    S.derivSign, S.risingSince = 0, nil
+    S.riseIntegral, S.riseWinStart, S.riseWinSpdMax = 0, nil, 0
+    S.detSignal = false
 end
 
-local function tickReturnDetector(t, hr, ball)
-    -- (legado / removido) substituído por tickTrajectory
-    -- mantida como no-op para não quebrar chamadas externas
-    S.detSignal = false
-    return
+local function updatePeakIfRising(t, dist)
+    if dist > (S.peakDist or 0) then
+        S.atPeak, S.peakDist = t, dist
+    end
 end
 
 local function tickTrajectory(t, hr, ball)
     S.detSignal = false
     if not (hr and hr.Parent and ball and ball.Parent) then
-        S.prevDist, S.maxSinceLast, S.atPeak, S.peakDist = nil, nil, nil, nil
-        S.derivSign, S.risingSince, S.detRadius = 0, nil, 0
+        resetTrajState()
+        _detRadius = 0
         return
     end
 
@@ -238,13 +196,12 @@ local function tickTrajectory(t, hr, ball)
     local p = getP()
     local parryR = (p and p.DEFLECT_R or 0) + parryBonus()
     local spd = (_ctxCache and _ctxCache.valid) and (_ctxCache.spd or 0) or 0
-    S.detRadius = math.clamp(parryR + spd * C.TRAJ_RAD_SPD_K, C.TRAJ_RAD_FLOOR, C.TRAJ_RAD_CEIL)
+    _detRadius = math.clamp(parryR + spd * C.TRAJ_RAD_SPD_K, C.TRAJ_RAD_FLOOR, C.TRAJ_RAD_CEIL)
 
     if S.prevDist == nil then
         S.prevDist = dist
-        S.maxSinceLast = dist
         S.atPeak, S.peakDist = t, dist
-        S.risingSince = nil
+        S.riseIntegral, S.riseWinStart, S.riseWinSpdMax = 0, t, spd
         return
     end
 
@@ -260,62 +217,63 @@ local function tickTrajectory(t, hr, ball)
         sign = S.derivSign
     end
 
-    -- guard: primeiro frame com sinal, só atribui e sai
+    if S.riseWinStart == nil then
+        S.riseWinStart, S.riseWinSpdMax = t, spd
+    end
+    if t - S.riseWinStart > C.TRAJ_DEACT_WIN_T then
+        S.riseIntegral = 0
+        S.riseWinStart = t
+        S.riseWinSpdMax = spd
+    end
+    if sign == 1 and delta > 0 then
+        S.riseIntegral = S.riseIntegral + delta
+    end
+    if spd > S.riseWinSpdMax then S.riseWinSpdMax = spd end
+
     if S.derivSign == 0 then
         S.derivSign = sign
-        if sign == 1 and dist > (S.maxSinceLast or 0) then
-            S.maxSinceLast = dist
-            S.atPeak, S.peakDist = t, dist
-        end
+        if sign == 1 then updatePeakIfRising(t, dist) end
         return
     end
 
-    -- mesmo sinal: atualiza pico se subindo
     if sign == S.derivSign then
-        if sign == 1 and dist > (S.maxSinceLast or 0) then
-            S.maxSinceLast = dist
-            S.atPeak, S.peakDist = t, dist
-        end
+        if sign == 1 then updatePeakIfRising(t, dist) end
         return
     end
 
-    -- INVERSÃO detectada
     local prevSign = S.derivSign
     S.derivSign = sign
 
     if prevSign == 1 and sign == -1 then
-        -- return: estava subindo, agora desce
-        local traveled = (S.maxSinceLast or 0) - dist
+        local traveled = (S.peakDist or 0) - dist
         if S.atPeak and traveled >= C.TRAJ_INV_MIN_TRAVEL then
             local dtInv = t - S.atPeak
             local expectedTime = spd > 1 and (traveled / spd) or 0.1
             local ratio = dtInv / expectedTime
-            if dist <= S.detRadius and ratio < C.TRAJ_INV_RATIO_MAX then
+            if dist <= _detRadius and ratio < C.TRAJ_INV_RATIO_MAX then
                 S.detSignal = true
+                S.riseIntegral, S.riseWinStart, S.riseWinSpdMax = 0, t, spd
             end
         end
         S.risingSince = nil
     elseif sign == 1 then
-        -- voltou a subir
         S.risingSince = t
-        if not S.atPeak then
-            S.atPeak, S.peakDist = t, dist
-        end
+        S.atPeak, S.peakDist = nil, nil
     end
 
-    -- acompanhamento do vale/pico conforme direção
-    if sign == -1 and dist < (S.maxSinceLast or dist) then
-        S.maxSinceLast = dist
+    if sign == -1 then
+        S.riseIntegral = 0
+        S.riseWinStart = t
+        S.riseWinSpdMax = spd
     end
 end
 
-
+-- clash transitions
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.ballGoneSince = 0
-    S.prevDist, S.maxSinceLast, S.atPeak, S.peakDist = nil, nil, nil, nil
-    S.derivSign, S.risingSince, S.detRadius = 0, nil, 0
-    S.detSignal = false
+    resetTrajState()
+    _detRadius = 0
     _ctxCache.valid = false
 end
 
@@ -323,34 +281,20 @@ local function activateClash(t)
     S.clashOn       = true
     S.clashAt       = t
     S.ballGoneSince = 0
-    S.prevDist, S.maxSinceLast, S.atPeak, S.peakDist = nil, nil, nil, nil
-    S.derivSign, S.risingSince, S.detRadius = 0, nil, 0
-    S.detSignal = false
+    resetTrajState()
+    _detRadius = 0
     _ctxCache.valid = false
 end
-
-
-
-
-
-
-
 
 local function shouldMaintain(t, ctx)
     if t < S.clashAt + C.MAINT_HOLD_MIN then return true end
     if not ctx then return false end
     if ctx.bDist > C.MAINT_BALL_GONE_DIST then return false end
-
-
     if ctx.bDist <= C.MAINT_BALL_RADIUS then return true end
-
 
     local spd = ctx.spd or 0
     if ctx.tImp > 0 and ctx.tImp <= maintTimpMax(spd) then return true end
-
-
     if ctx.targeted or recentlyTargeted(t) then return true end
-
 
     local ap = AutoParry and AutoParry.getState and AutoParry.getState() or nil
     if ap and ap.firedAt and (t - ap.firedAt) < C.MAINT_PARRY_KEEP then return true end
@@ -358,15 +302,9 @@ local function shouldMaintain(t, ctx)
     return false
 end
 
-
-
-
-
-
-local function shouldDeactivate(t, ctx, hr)
+local function shouldDeactivate(t, ctx)
     if not ctx then return false end
 
-    -- hard gone: bola muito longe por muito tempo
     if ctx.bDist > C.MAINT_DEAD_DIST then
         if S.ballGoneSince == 0 then S.ballGoneSince = t end
         if (t - S.ballGoneSince) >= C.DEACT_HARD_GONE_T then return true end
@@ -374,32 +312,36 @@ local function shouldDeactivate(t, ctx, hr)
         S.ballGoneSince = 0
     end
 
-    -- trajetória: bola subindo consistente por X tempo sem inverter E de fato se afastou
-    if S.risingSince and (t - S.risingSince) >= C.TRAJ_DEACT_RISE_T then
-        if S.maxSinceLast and (S.maxSinceLast - ctx.bDist) > C.TRAJ_DEACT_TRAVEL_MIN then
-            return true
+    if S.riseWinStart
+        and (t - S.riseWinStart) >= C.TRAJ_DEACT_WIN_T then
+
+        local spdMax = S.riseWinSpdMax or 0
+
+        if spdMax > 1 then
+            local winT = t - S.riseWinStart
+            local expected = spdMax * winT
+
+            if expected > 0 then
+                local ratio = S.riseIntegral / expected
+
+                if ratio >= C.TRAJ_DEACT_RATIO_MIN
+                    and ctx.bDist > _detRadius then
+                    return true
+                end
+            end
         end
     end
 
     return false
 end
 
-
-
-
-
-
-
-
 local function shouldActivate(t, ctx, hr, targetJustChangedToMe)
     local targeted = ctx and ctx.targeted or isTargeted()
     if not targeted then
-
         if S.dashAnti.untilT > t then return true end
         if S.dashPanicUntil > t then return true end
         return false
     end
-
 
     if targetJustChangedToMe and ctx then
         if ctx.bDist <= C.ACT_HARD_CAP and ctx.tImp > 0 and ctx.tImp <= C.ACT_TIMP_FAST then
@@ -408,15 +350,11 @@ local function shouldActivate(t, ctx, hr, targetJustChangedToMe)
     end
 
     if S.detSignal then return true end
-
     if S.dashAnti.untilT > t then return true end
     if S.dashPanicUntil > t then return true end
 
-    if invisibleGate(ctx, hr) then return true end
-
     return false
 end
-
 
 local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
     if not config or config.AutoClash == false or _G.PhantomManual then
@@ -424,23 +362,21 @@ local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
         return
     end
 
-    tickTrajectory(t, hr, ball)
     local ctx = clashSnapshot()
+    tickTrajectory(t, hr, ball)
 
     if S.clashOn then
         if (t - S.clashAt) > C.MAX_HOLD
-            or (not shouldMaintain(t, ctx) and shouldDeactivate(t, ctx, hr)) then
+            or shouldDeactivate(t, ctx) then
             clearClash()
         end
         return
     end
 
-
     if shouldActivate(t, ctx, hr, targetJustChangedToMe) then
         activateClash(t)
     end
 end
-
 
 local function onTarget(newTarget, t)
     if type(newTarget) ~= "number" then return end
@@ -451,7 +387,7 @@ local function onTarget(newTarget, t)
     _ctxCache.valid = false
 end
 
-
+-- dash tracking
 local function updateDashTrack(t)
     if (t - _lastDashTrack) < C.DASH_TRACK_INTERVAL then return end
     _lastDashTrack = t
@@ -525,7 +461,6 @@ local function updateDashTrack(t)
     end
 end
 
-
 local function reportDash(player)
     if not player or not Utils then return end
     local lp = Utils.getLocalPlayer()
@@ -566,11 +501,9 @@ local function hookPlayer(player)
     if not player or player == Utils.getLocalPlayer() then return end
     if _antidashHooked[player] then return end
     _antidashHooked[player] = true
-    -- FIX: rastreia conexões por character pra desconectar no próximo respawn
     local charConns = {}
     local function attach(char)
         if not char then return end
-        -- limpa conexões do character anterior (evita duplicação em respawn)
         for i = #charConns, 1, -1 do
             local c = charConns[i]
             charConns[i] = nil
@@ -610,7 +543,6 @@ local function installAntiDashHooks()
     end))
 end
 
-
 -- public
 function AutoClash.setup(deps)
     GameInfo, Utils, AutoParry = deps.GameInfo, deps.Utils, deps.AutoParry
@@ -638,9 +570,8 @@ function AutoClash.resetState()
     S.targetRingIdx, S.targetCps = 0, 0
     for i = 1, RING_BUF do S.targetRing[i] = 0 end
     S.ballGoneSince = 0
-    S.prevDist, S.maxSinceLast, S.atPeak, S.peakDist = nil, nil, nil, nil
-    S.derivSign, S.risingSince, S.detRadius = 0, nil, 0
-    S.detSignal = false
+    resetTrajState()
+    _detRadius = 0
     table.clear(S.dashEvents)
     S.dashPanicUntil, S.dashAnti = 0, { untilT = 0 }
     _ctxCache.valid = false
