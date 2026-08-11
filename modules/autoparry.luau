@@ -16,7 +16,8 @@ local P = {
     DEFLECT_R = 8.5,
     RAD_FLOOR = 14,
     LEAD_CAP = 80,
-    PRE_CAP = 30,
+    PING_FLOOR = 0.030,
+    PING_CAP = 0.150,
     PB_WEIGHT = 1.0,
 
     RES_BASE = 0,
@@ -61,6 +62,23 @@ local _apBind = 0
 local _localUserId = -1
 local _onFired = nil
 local _lastTargetSeen = -999
+
+-- estado de ping
+local _smoothPing = 0.060  -- começa com 60ms como fallback
+local _pingTimer  = 0
+local PING_SAMPLE = 1.5    -- amostra a cada 1.5s
+local PING_EMA    = 0.3    -- suavização
+
+-- amostragem de ping via Roblox Stats
+local Stats = game:GetService("Stats")
+local function samplePing()
+    local ok, p = pcall(function()
+        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
+    end)
+    if ok and type(p) == "number" and p > 0 and p < 0.5 then
+        _smoothPing = _smoothPing * (1 - PING_EMA) + p * PING_EMA
+    end
+end
 
 -- resiliência
 local function resRadiusBonus()
@@ -203,6 +221,14 @@ local function bindParry(character)
                     return
                 end
                 tickResilience(t)
+
+                -- amostra ping periodicamente
+                _pingTimer = _pingTimer + dt
+                if _pingTimer >= PING_SAMPLE then
+                    _pingTimer = 0
+                    samplePing()
+                end
+
                 local ball = GameInfo.getBall()
                 if not (ball and ball.Parent) then
                     return
@@ -222,11 +248,10 @@ local function bindParry(character)
                     return
                 end
 
-                -- lead simples baseado na velocidade e num piso (sem subsistema de ping)
-                local leadSec = 0.060
-                local leadB = math.min(spd * leadSec, P.LEAD_CAP)
-                local pbStuds = math.min(spd * 0.05, P.PRE_CAP) -- pre-buffer leve baseado em spd
-                local parryRad = math.max(P.DEFLECT_R + leadB + pbStuds + resRadiusBonus(), P.RAD_FLOOR)
+                -- lead proporcional ao ping (suavizado) com piso e teto
+                local leadSec = math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
+                local leadB   = math.min(spd * leadSec, P.LEAD_CAP)
+                local parryRad = math.max(P.DEFLECT_R + leadB + resRadiusBonus(), P.RAD_FLOOR)
 
                 local dx = hrp.Position.X - bp.X
                 local dy = hrp.Position.Y - bp.Y
