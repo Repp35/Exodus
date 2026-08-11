@@ -248,17 +248,29 @@ local function bindParry(character)
                     return
                 end
 
-                -- lead proporcional ao ping (suavizado) com piso e teto
-                local leadSec = math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
-                local leadB   = math.min(spd * leadSec, P.LEAD_CAP)
-                local parryRad = math.max(P.DEFLECT_R + leadB + resRadiusBonus(), P.RAD_FLOOR)
+                -- ping one-way suavizado (piso/teto) + folga de 1 frame pro jitter
+                local pingOneWay = math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
+                local triggerWindow = pingOneWay + 0.016
+
+                -- raio físico real do servidor (sem lead — o lead vai no tempo de decisão)
+                local parryRad = math.max(P.DEFLECT_R + resRadiusBonus(), P.RAD_FLOOR)
+                -- raio expandido pra começar a monitorar a bola cedo o suficiente
+                local detectRad = parryRad + spd * pingOneWay
 
                 local dx = hrp.Position.X - bp.X
                 local dy = hrp.Position.Y - bp.Y
                 local dz = hrp.Position.Z - bp.Z
-                local dist2 = dx * dx + dy * dy + dz * dz
-                if dist2 > parryRad * parryRad then
+                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+                -- fora da zona expandida: nem monitora
+                if dist > detectRad then
                     AP.wasInRange, AP.inRangeEnterAt = false, 0
+                    return
+                end
+
+                -- tImp: tempo estimado até a bola entrar no raio físico real
+                local tImp = math.max((dist - parryRad) / spd, 0)
+                if tImp > triggerWindow then
                     return
                 end
                 AP.wasInRange = true
