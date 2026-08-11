@@ -9,16 +9,10 @@ local C = {
     DEACT_HARD_GONE_T    = 0.20,
     DEACT_DEAD_DIST      = 80,
 
-    DEACT_TIMP_BASE      = 0.220,
-    DEACT_TIMP_FLOOR     = 0.050,
-    DEACT_TIMP_CEIL      = 0.400,
-    OFF_TIMP_BASE        = 0.090,
-    OFF_TIMP_FLOOR       = 0.050,
-
-    TIMP_RISE_FLOOR      = 0.006,
-    TIMP_RISE_N_OF_M     = 2,
-    TIMP_RISE_M          = 3,
-    BALL_HARD_CAP        = 22,
+    DEACT_CLICK_WINDOW   = 0.100,  -- janela adicional pra evitar flick
+    DEACT_PING_FLOOR     = 0.030,
+    DEACT_PING_CAP       = 0.150,
+    DEACT_RADIAL_EMA     = 0.35,
 
     ACT_HARD_CAP         = 22,
     ACT_TIMP_FAST        = 0.085,
@@ -59,7 +53,7 @@ local S = {
     dashEvents = {}, dashPanicUntil = 0,
     dashAnti = { untilT = 0 },
 
-    lastTImp = 0, lastTImpAt = 0, tImpRising = false, tImpRiseHist = {0, 0, 0},
+    radialSpdEma = 0,
 }
 
 local _localUserId       = -1
@@ -83,21 +77,6 @@ end
 
 local function isTargeted()
     return GameInfo.isTargeted(S.lastTarget)
-end
-
--- tImp cap helpers — fórmula única, escala contínua com a velocidade
-local function speedScaledTimp(base, spd, floor, ceil)
-    if spd < 1 then return base end
-    local s = math.clamp(60 / spd, 0.2, 2.5)
-    return math.clamp(base * s, floor, ceil)
-end
-
-local function deactTimpMax(spd)
-    return speedScaledTimp(C.DEACT_TIMP_BASE, spd, C.DEACT_TIMP_FLOOR, C.DEACT_TIMP_CEIL)
-end
-
-local function offLimitFor(spd)
-    return speedScaledTimp(C.OFF_TIMP_BASE, spd, C.OFF_TIMP_FLOOR, C.OFF_TIMP_BASE)
 end
 
 -- snapshot cache
@@ -214,8 +193,7 @@ end
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.ballGoneSince      = 0
-    S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, false
-    S.tImpRiseHist       = {0, 0, 0}
+    S.radialSpdEma       = 0
     resetTrajState()
     _detRadius        = 0
     _ctxCache.valid   = false
@@ -225,8 +203,7 @@ local function activateClash(t)
     S.clashOn       = true
     S.clashAt       = t
     S.ballGoneSince = 0
-    S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, false
-    S.tImpRiseHist  = {0, 0, 0}
+    S.radialSpdEma  = 0
     resetTrajState()
     _detRadius      = 0
     _ctxCache.valid = false
@@ -236,6 +213,7 @@ end
 local function shouldDeactivate(t, ctx)
     if not ctx then return false end
 
+    -- hard gone
     if ctx.bDist > C.DEACT_DEAD_DIST then
         if S.ballGoneSince == 0 then S.ballGoneSince = t end
         if (t - S.ballGoneSince) >= C.DEACT_HARD_GONE_T then return true end
@@ -243,39 +221,42 @@ local function shouldDeactivate(t, ctx)
         S.ballGoneSince = 0
     end
 
-    local tImp, spd = ctx.tImp, ctx.spd or 0
+    local spd = ctx.spd or 0
     if spd < 1 then return false end
 
-    if tImp > deactTimpMax(spd) then return true end
-
-    local rising = false
-    if S.lastTImpAt > 0 then
-        local dTImp = tImp - S.lastTImp
-        for i = 1, C.TIMP_RISE_M - 1 do
-            S.tImpRiseHist[i] = S.tImpRiseHist[i + 1]
-        end
-        S.tImpRiseHist[C.TIMP_RISE_M] = (dTImp > C.TIMP_RISE_FLOOR) and 1 or 0
-        local cnt = 0
-        for i = 1, C.TIMP_RISE_M do cnt = cnt + (S.tImpRiseHist[i] or 0) end
-        S.tImpRising = cnt >= C.TIMP_RISE_N_OF_M
-        rising       = S.tImpRising
-    end
-    S.lastTImp, S.lastTImpAt = tImp, t
-
-    if rising and tImp > offLimitFor(spd) then return true end
-    if rising and ctx.bDist > C.BALL_HARD_CAP then return true end
-
-    if rising and ctx.hr and ctx.hr.Parent and ctx.ball and ctx.ball.Parent then
+    -- velocidade radial com EMA
+    local radialSpd = 0
+    if ctx.hr and ctx.hr.Parent and ctx.ball and ctx.ball.Parent then
         local ok, av = pcall(function() return ctx.ball.AssemblyLinearVelocity end)
         if ok and typeof(av) == "Vector3" and av.Magnitude > 1 then
             local toMe = ctx.hr.Position - ctx.ball.Position
-            if toMe.Magnitude > 0.5 and av.Unit:Dot(toMe.Unit) < 0 then
-                return true
+            if toMe.Magnitude > 0.1 then
+                radialSpd = av:Dot(toMe.Unit)
             end
         end
     end
+    S.radialSpdEma = S.radialSpdEma * (1 - C.DEACT_RADIAL_EMA) + radialSpd * C.DEACT_RADIAL_EMA
 
-    return false
+    -- ping e raio efetivo
+    local pingOneWay = AutoParry and AutoParry.getPingOneWay
+        and AutoParry.getPingOneWay()
+        or C.DEACT_PING_FLOOR
+
+    local p = getP()
+    local baseRad = (p and p.DEFLECT_R or 8.5) + parryBonus()
+    local raioEfetivo = math.max(
+        baseRad + spd * (pingOneWay + C.DEACT_CLICK_WINDOW),
+        14
+    )
+
+    -- posição prevista quando o clique chegar ao servidor
+    local futureDist = ctx.bDist - S.radialSpdEma * pingOneWay
+
+    -- bola vai estar dentro da zona → não desativa
+    if futureDist <= raioEfetivo then return false end
+
+    -- bola vai estar fora → desativa
+    return true
 end
 
 local function shouldActivate(t, ctx, targetJustChangedToMe)
@@ -478,8 +459,7 @@ function AutoClash.resetState()
     S.clashOn, S.clashAt = false, 0
     S.lastTarget, S.lastTargetAt = -999, 0
     S.ballGoneSince = 0
-    S.lastTImp, S.lastTImpAt, S.tImpRising = 0, 0, false
-    S.tImpRiseHist  = {0, 0, 0}
+    S.radialSpdEma  = 0
     resetTrajState()
     _detRadius = 0
     table.clear(S.dashEvents)
