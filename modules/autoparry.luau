@@ -368,6 +368,10 @@ function AutoParry.getP()
     return P
 end
 
+function AutoParry.getPingOneWay()
+    return math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
+end
+
 if _G.ExodusModules then
     _G.ExodusModules.AutoParry = AutoParry
 end
