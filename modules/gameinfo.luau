@@ -25,6 +25,7 @@ local _sync = {
     lastSyncAt = 0,
     positionAt = 0,
     DeflectDir = Vector3.new(0, 0, 0),
+    Grace      = false,
 }
 
 local _liveTImpCache = { tImp = math.huge, bp = Vector3.new(0,0,0), spd = 0, at = 0 }
@@ -179,7 +180,13 @@ local function applySync(d)
     if typeof(d.DeflectDirection) == "Vector3" then
         _sync.DeflectDir = d.DeflectDirection
     end
-    if type(d.TargetPlayerID) == "number" then _sync.Target = d.TargetPlayerID end
+    if type(d.TargetPlayerID) == "number" then
+        if _sync.Target ~= d.TargetPlayerID and d.TargetPlayerID == Utils.getLocalPlayer().UserId then
+            _sync.Grace = false
+        end
+        _sync.Target = d.TargetPlayerID
+    end
+    if type(d.Grace) == "boolean" then _sync.Grace = d.Grace end
     _sync.lastSyncAt = t
     _liveTImpCache.at = 0
 end
@@ -260,6 +267,7 @@ function GameInfo.syncTarget()       return _sync.Target end
 function GameInfo.syncLastAt()       return _sync.lastSyncAt end
 function GameInfo.syncSpeed()        return _sync.Speed end
 function GameInfo.syncRealPos()      return _sync.RealPos end
+function GameInfo.isGrace()          return _sync.Grace == true end
 function GameInfo.installBallWatcher(fn) return installBallWatcher(fn) end
 function GameInfo.getDeflectCD()     return getDeflectCD() end
 
