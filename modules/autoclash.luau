@@ -5,6 +5,7 @@ local GameInfo, Utils, AutoParry
 
 local C = {
     DEACT_OUT_FRAMES     = 2,
+    DEACT_RAD_MIN        = 14,
 
     TRAJ_DIST_FLOOR      = 0.05,
     TRAJ_RAD_FLOOR       = 18,
@@ -72,6 +73,13 @@ local function getBaseRadius(t)
         return AutoParry.computeParryRadius(ctx.spd, t) + parryBonus()
     end
     return 8.5 + parryBonus()
+end
+
+-- ── deact radius ───────────────────────────────────────────────────────────
+
+local function getDeactRadius()
+    local p = AutoParry and AutoParry.getP and AutoParry.getP() or nil
+    return math.max((p and p.DEFLECT_R or 8.5) + parryBonus(), C.DEACT_RAD_MIN)
 end
 
 local function clashSnapshot()
@@ -230,7 +238,7 @@ end
 
 local function shouldDeactivate(t, ctx)
     if not ctx then return false end
-    local isOut = ctx.bDist > getBaseRadius(t)
+    local isOut = ctx.bDist > getDeactRadius()
     S.outOfRangeFrames = isOut and (S.outOfRangeFrames + 1) or 0
     return S.outOfRangeFrames >= C.DEACT_OUT_FRAMES
 end
@@ -239,14 +247,15 @@ local function shouldActivate(t, ctx)
     if not (ctx and (ctx.targeted or isTargeted())) then return false end
     if not (ctx and ctx.bDist) then return false end
 
-    local r = getBaseRadius(t)
-    if ctx.bDist > r then return false end
-    if (ctx.radialSpd or 0) >= 0 then return false end
-
+    -- signals já confirmaram o return → ativa direto
     if S.detSignal then return true end
     if S.returnDetected then return true end
 
-    return false
+    -- sem signal → exige bola dentro do raio vindo em direção a você
+    local r = getBaseRadius(t)
+    if ctx.bDist > r then return false end
+    if (ctx.radialSpd or 0) >= 0 then return false end
+    return true
 end
 
 -- ── evaluate ────────────────────────────────────────────────────────────────
