@@ -14,7 +14,7 @@ local P = {
     DEFLECT_R    = 8.5,
 
     LEAD_REACT_T = 0.040,
-    LEAD_CAP     = 50,
+    LEAD_CAP     = 100,
 
     PB_BASE_MS   = 85,
     PB_JITTER    = 1.4,
@@ -391,8 +391,6 @@ local function bindParry(character)
         local hx, hy, hz = hrp.Position.X, hrp.Position.Y, hrp.Position.Z
         local dx, dy, dz = hx - bp.X, hy - bp.Y, hz - bp.Z
         if dx*dx + dy*dy + dz*dz > parryRad * parryRad then return end
-
-        if vel and vel.X * dx + vel.Y * dy + vel.Z * dz <= 0 then return end
 
         if AP.fired then
             if (t - AP.firedAt) >= P.FIRE_TIMEOUT then AP.fired = false end
