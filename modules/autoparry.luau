@@ -1,77 +1,183 @@
---[[ auto parry ]]
+-- [[ auto parry ]]
 
 local AutoParry = {}
 local Probe, GameInfo, Utils
 
--- tunings
+-- ── tunings ─────────────────────────────────────────────────────────────────
+
 local P = {
-    FIRE_LOCK = 0.080,
+    FIRE_LOCK    = 0.080,
     FIRE_TIMEOUT = 2.0,
-    MIN_SPD = 5,
-    DEFLECT_R = 8.5,
-    RAD_FLOOR = 14,
-    PING_FLOOR = 0.030,
-    PING_CAP = 0.150,
+    SYNC_FRESH   = 0.30,
+    MIN_SPD      = 5,
 
-    RES_BASE = 0,
-    RES_PER_PARRY = 0.225,
-    RES_CAP = 32,
-    RES_HOLD_T = 1.2,
-    RES_DECAY_T = 4.0,
+    DEFLECT_R    = 8.5,
+
+    LEAD_REACT_T = 0.040,
+    LEAD_CAP     = 50,
+
+    PB_BASE_MS   = 85,
+    PB_JITTER    = 1.4,
+    PB_DRIFT_MIN = 20,
+    PB_DRIFT_M   = 0.6,
+    PB_FPS_K     = 0.020,
+    PB_FLOOR_MS  = 35,
+    PB_CAP_MS    = 200,
+    PRE_CAP      = 30,
+
+    PING_SAMPLE  = 1.5,
+    PING_EMA     = 0.3,
+    PING_MAX     = 0.150,
+
+    RES_BASE            = 0,
+    RES_PER_PARRY       = 0.225,
+    RES_CAP             = 32,
+    RES_HOLD_T          = 1.2,
+    RES_DECAY_T         = 4.0,
     RES_HITBOX_OWN_WINDOW = 0.5,
-    RES_HITBOX_PROX = 12,
-    RES_HITBOX_GAP = 0.4,
+    RES_HITBOX_PROX     = 12,
+    RES_HITBOX_GAP      = 0.4,
 }
 
--- estado ap
-local AP = {
-    armed = false,        -- condições de parry bateram, esperando CD zerar
-    armedBall = nil,      -- ball ref usada no momento do arm (pra invalidação)
-    armedAt = 0,
-    armedSig = nil,
-    fired = false,
-    firedAt = 0,
-}
+-- ── state ───────────────────────────────────────────────────────────────────
 
-local _activeConns = {}
+local AP = { fired = false, firedAt = 0 }
 
--- estado res
-local RES = {
-    stack = 0,
-    lastFireBallRef = nil,
-    lastFireBallAt = 0,
-    lastHitboxAt = 0,
-    lastStackAt = 0,
-}
-
-local _teleportLockUntil = 0
-local _apBind = 0
-local _localUserId = -1
-local _onFired = nil
 local _lastTargetSeen = -999
+local _localUserId    = -1
 
--- estado de ping
 local _smoothPing = 0.060
 local _pingTimer  = 0
-local PING_SAMPLE = 1.5
-local PING_EMA    = 0.3
 
-local _pingOneWayCached = 0.030
-local _pingOneWayStamp  = 0
+local _frameEMA  = 1/60
+local _frameVar  = 0
+local _jitterEMA = 0
+local _dtLast    = 0
+local _dtSamples = {}
+local _dtIdx     = 0
+
+local Sync = {
+    Speed    = 0,
+    RealPos  = Vector3.zero,
+    Target   = -999,
+    lastAt   = 0,
+    Teleport = false,
+}
+
+local RES = {
+    stack           = 0,
+    lastFireBallRef = nil,
+    lastFireBallAt  = 0,
+    lastHitboxAt    = 0,
+    lastStackAt     = 0,
+}
+
+local _resBonusCache = 0
+local _resBonusStamp = -1
+
+local _activeConns       = {}
+local _teleportLockUntil = 0
+local _apBind            = 0
+local _fbConn            = nil
+local _hitboxConn        = nil
+
+local _pbCache = { ms = -1, ping = -1, jitter = -1, var = -1 }
+
+-- ── ping ────────────────────────────────────────────────────────────────────
 
 local Stats = game:GetService("Stats")
+
 local function samplePing()
     local ok, p = pcall(function()
         return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
     end)
     if ok and type(p) == "number" and p > 0 and p < 0.5 then
-        _smoothPing = _smoothPing * (1 - PING_EMA) + p * PING_EMA
+        _smoothPing = _smoothPing * (1 - P.PING_EMA) + p * P.PING_EMA
     end
 end
 
--- resiliência
-local _resBonusCache = 0
-local _resBonusStamp = -1
+local function pingOneWay()
+    return math.clamp(_smoothPing * 0.5, 0, P.PING_MAX)
+end
+
+-- ── frame delta / jitter / variance ─────────────────────────────────────────
+
+local function sampleFrameDelta(dt)
+    if dt <= 0 then return end
+
+    _frameEMA = _frameEMA * 0.9 + dt * 0.1
+
+    _dtIdx = (_dtIdx % 60) + 1
+    _dtSamples[_dtIdx] = dt
+
+    if _dtLast > 0 then
+        local devMs = math.abs(dt - _dtLast) * 1000
+        _jitterEMA = _jitterEMA * 0.85 + devMs * 0.15
+    end
+    _dtLast = dt
+
+    local acc, cnt = 0, 0
+    for i = 1, 60 do
+        local v = _dtSamples[i]
+        if v then
+            acc = acc + (v - _frameEMA) * (v - _frameEMA)
+            cnt = cnt + 1
+        end
+    end
+    if cnt > 0 then
+        local inst = acc / cnt
+        _frameVar = _frameVar * 0.9 + inst * 0.1
+    end
+end
+
+-- ── preBuffer ───────────────────────────────────────────────────────────────
+
+local function preBufferMs()
+    local p        = pingOneWay() * 1000
+    local jitter   = _jitterEMA
+    local variance = _frameVar
+
+    if math.abs(p - _pbCache.ping) < 1
+        and math.abs(jitter - _pbCache.jitter) < 0.5
+        and math.abs(variance - _pbCache.var) < 1e-7
+        and _pbCache.ms > 0
+    then
+        return _pbCache.ms
+    end
+
+    local pb = P.PB_BASE_MS + jitter * P.PB_JITTER
+    local driftMs = math.max(variance * 1000 * 100, P.PB_DRIFT_MIN)
+    pb = pb + driftMs * P.PB_DRIFT_M
+
+    local fps = 60
+    if _frameEMA > 0 then fps = 1 / _frameEMA end
+    if fps < 60 then
+        pb = pb + (60 - fps) * P.PB_FPS_K * 1000
+    end
+
+    pb = math.clamp(pb, P.PB_FLOOR_MS, P.PB_CAP_MS)
+
+    _pbCache.ms = pb
+    _pbCache.ping = p
+    _pbCache.jitter = jitter
+    _pbCache.var = variance
+    return pb
+end
+
+-- ── lead / preBuffer studs ──────────────────────────────────────────────────
+
+local function leadStuds(spd)
+    if not spd or spd < 1 then return 0 end
+    return math.min(spd * (pingOneWay() + P.LEAD_REACT_T), P.LEAD_CAP)
+end
+
+local function preBufferStuds(spd)
+    if not spd or spd < 1 then return 0 end
+    return math.min(spd * preBufferMs() / 1000, P.PRE_CAP)
+end
+
+-- ── resilience ──────────────────────────────────────────────────────────────
+
 local function resRadiusBonus(t)
     if t == _resBonusStamp then return _resBonusCache end
     _resBonusCache = math.min(RES.stack * P.RES_PER_PARRY, P.RES_CAP)
@@ -88,13 +194,16 @@ local function tickResilience(t)
     end
     if since > P.RES_HOLD_T then
         local frac = 1 - (since - P.RES_HOLD_T) / P.RES_DECAY_T
-        if frac <= 0 then RES.stack = 0
+        if frac <= 0 then
+            RES.stack = 0
         else
             local decayed = math.floor(RES.stack * frac + 0.5)
             if decayed ~= RES.stack then RES.stack = decayed end
         end
     end
 end
+
+-- ── core ────────────────────────────────────────────────────────────────────
 
 local function getDeflectCD() return GameInfo.getDeflectCD() end
 
@@ -103,16 +212,17 @@ local function sendParry()
     if not Probe.fireParry(1) then return false end
     local b = GameInfo.getBall()
     if b and b.Parent then RES.lastFireBallRef, RES.lastFireBallAt = b, t end
-    if _onFired then _onFired(t) end
     return true
 end
 
+-- ── bookkeeping ─────────────────────────────────────────────────────────────
+
 local function resetState()
-    AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
     AP.fired, AP.firedAt = false, 0
     RES.stack, RES.lastFireBallRef, RES.lastFireBallAt, RES.lastHitboxAt, RES.lastStackAt = 0, nil, 0, 0, 0
     _teleportLockUntil, _lastTargetSeen = 0, -999
     _resBonusCache, _resBonusStamp = 0, -1
+    Sync.Speed, Sync.RealPos, Sync.Target, Sync.lastAt, Sync.Teleport = 0, Vector3.zero, -999, 0, false
 end
 
 local function disconnectAll()
@@ -125,148 +235,50 @@ local function disconnectAll()
     end
 end
 
+-- ── ball sync ───────────────────────────────────────────────────────────────
+
 local function onBallSync(data)
     if typeof(data) ~= "table" then return end
     local t = Utils.now()
+
     if data.Teleported == true then
         _teleportLockUntil = t + 0.20
         AP.fired = false
+        Sync.Teleport = true
         return
     end
-    GameInfo.applySync(data)
+
+    if GameInfo.applySync then GameInfo.applySync(data) end
+
+    if type(data.Speed) == "number" then Sync.Speed = data.Speed end
+    if typeof(data.RealPosition) == "Vector3" then Sync.RealPos = data.RealPosition end
+    Sync.lastAt = t
+    Sync.Teleport = false
+
     local newTarget = data.TargetPlayerID
     if type(newTarget) ~= "number" then newTarget = -999 end
+    Sync.Target = newTarget
+
     if newTarget == _lastTargetSeen then return end
     local previousTarget = _lastTargetSeen
     _lastTargetSeen = newTarget
-    if newTarget == _localUserId then AP.fired = false
-    elseif newTarget ~= -999 then
-        if previousTarget == _localUserId then AP.fired = false end
-    else AP.fired = false end
+    if newTarget == _localUserId or newTarget == -999 or previousTarget == _localUserId then
+        AP.fired = false
+    end
 end
 
-local function bindParry(character)
-    _apBind = _apBind + 1
-    local currentBindId = _apBind
-    disconnectAll()
-    if not (character and character.Parent) then return end
-    local hrp = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 1)
-    if currentBindId ~= _apBind or not (hrp and hrp.Parent) then return end
-    AP.fired, AP.armed = false, false
+-- ── frame sampler ───────────────────────────────────────────────────────────
 
-    local heartbeatConn
-    heartbeatConn = Utils.getRunService().Heartbeat:Connect(function(dt)
-        if currentBindId ~= _apBind or not (character.Parent and hrp.Parent) then return end
-        local Config = Utils.getConfig()
-        if not Config or Config.AutoParry ~= true then
-            AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
-            AP.fired = false
-            return
-        end
-        local t = Utils.now()
-        if t < _teleportLockUntil then
-            AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
-            return
-        end
-        if Utils.isClashActive() or Utils.isManualSpamActive() then return end
-        tickResilience(t)
-
-        _pingTimer = _pingTimer + dt
-        if _pingTimer >= PING_SAMPLE then _pingTimer = 0; samplePing() end
-
-        -- fast path: armado, esperando CD zerar (sem timeout, só desarma se target mudar)
-        if AP.armed then
-            local curBall = GameInfo.getBall()
-            local stillTargeted = GameInfo.isTargeted(_lastTargetSeen)
-            local ballAlive = AP.armedBall and AP.armedBall.Parent ~= nil
-            local sameBall = (curBall == AP.armedBall)
-            if not (stillTargeted and ballAlive and sameBall) then
-                -- target mudou / bola sumiu / bola trocou → desarma
-                AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
-            elseif getDeflectCD() <= 0 then
-                -- CD zerou: dispara instantaneamente
-                if AP.fired then
-                    if (t - AP.firedAt) >= P.FIRE_TIMEOUT then AP.fired = false end
-                end
-                if not AP.fired then
-                    if sendParry() then
-                        AP.fired, AP.firedAt = true, t
-                    end
-                end
-                AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
-                return
-            else
-                -- ainda em CD, mantém armado e espera o próximo frame
-                return
-            end
-        end
-
-        local ball = GameInfo.getBall()
-        if not (ball and ball.Parent) then return end
-        if not GameInfo.isTargeted(_lastTargetSeen) then
-            AP.armed = false
-            return
-        end
-        local spd = GameInfo.ballSpeed(ball, t)
-        if spd < P.MIN_SPD then return end
-
-        local bp = GameInfo.ballPos(ball, t)
-        if not bp then return end
-
-        local pingOneWay = _pingOneWayCached
-        if t - _pingOneWayStamp > 0.25 then
-            _pingOneWayCached = math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
-            _pingOneWayStamp  = t
-            pingOneWay         = _pingOneWayCached
-        end
-        local triggerWindow = pingOneWay + 0.016
-
-        local parryRad  = math.clamp(P.DEFLECT_R + P.RAD_FLOOR, 18, 30)
-        local detectRad = parryRad + spd * pingOneWay
-
-        local hp = hrp.Position
-        local dx, dy, dz = hp.X - bp.X, hp.Y - bp.Y, hp.Z - bp.Z
-        local dist = dx * dx + dy * dy + dz * dz
-
-        if dist > detectRad * detectRad then return end
-        dist = math.sqrt(dist)
-
-        local tImp = (dist - parryRad) / spd
-        if tImp < 0 then tImp = 0 end
-        if tImp > triggerWindow then return end
-
-        -- cooldown gate: se tá em CD, ARMA em vez de descartar
-        if getDeflectCD() > 0 then
-            AP.armed = true
-            AP.armedBall = ball
-            AP.armedAt = t
-            AP.armedSig = true -- marcado; a checagem de validade usa armedBall
-            return
-        end
-
-        if AP.fired then
-            if (t - AP.firedAt) < P.FIRE_LOCK then return end
-            if (t - AP.firedAt) < P.FIRE_TIMEOUT then return end
-            AP.fired = false
-        end
-        if sendParry() then
-            AP.fired, AP.firedAt = true, t
-        else
-            AP.fired = false
-        end
-    end)
-    _activeConns[#_activeConns + 1] = heartbeatConn
-    Utils.trackCharacter(heartbeatConn)
-
-    local ancestryConn = character.AncestryChanged:Connect(function(_, parent)
-        if not parent then _apBind = _apBind + 1 end
-    end)
-    _activeConns[#_activeConns + 1] = ancestryConn
-    Utils.trackCharacter(ancestryConn)
+local function installFrameSampler()
+    if _fbConn then return end
+    local ok, sig = pcall(function() return Utils.getRunService().Heartbeat end)
+    if not ok or not sig then return end
+    _fbConn = sig:Connect(function(dt) sampleFrameDelta(dt) end)
+    table.insert(_activeConns, _fbConn)
 end
 
--- setup
-local _hitboxConn
+-- ── hitbox hook ─────────────────────────────────────────────────────────────
+
 local function installHitboxHook()
     if _hitboxConn then return end
     local ws = game:GetService("Workspace")
@@ -285,25 +297,104 @@ local function installHitboxHook()
     table.insert(_activeConns, _hitboxConn)
 end
 
+-- ── main loop ───────────────────────────────────────────────────────────────
+
+local function bindParry(character)
+    _apBind = _apBind + 1
+    local currentBindId = _apBind
+    disconnectAll()
+    if not (character and character.Parent) then return end
+    local hrp = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 1)
+    if currentBindId ~= _apBind or not (hrp and hrp.Parent) then return end
+    AP.fired = false
+    installFrameSampler()
+
+    local heartbeatConn
+    heartbeatConn = Utils.getRunService().Heartbeat:Connect(function(dt)
+        if currentBindId ~= _apBind or not (character.Parent and hrp.Parent) then return end
+
+        local Config = Utils.getConfig()
+        if not Config or Config.AutoParry ~= true then
+            AP.fired = false
+            return
+        end
+
+        local t = Utils.now()
+        if t < _teleportLockUntil then return end
+        if Utils.isClashActive() or Utils.isManualSpamActive() then return end
+
+        tickResilience(t)
+
+        _pingTimer = _pingTimer + dt
+        if _pingTimer >= P.PING_SAMPLE then _pingTimer = 0; samplePing() end
+
+        local ball = GameInfo.getBall()
+        if not (ball and ball.Parent) then return end
+        if not GameInfo.isTargeted(_lastTargetSeen) then return end
+        if Sync.Target ~= -999 and Sync.Target ~= _localUserId then return end
+
+        local spd, vel, bp
+        local syncFresh = (t - Sync.lastAt) < P.SYNC_FRESH
+        if syncFresh and Sync.Speed > 0 then
+            spd = Sync.Speed
+            bp  = (Sync.RealPos ~= Vector3.zero) and Sync.RealPos or ball.Position
+            local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+            vel = (ok and typeof(av) == "Vector3") and av or nil
+        else
+            local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+            if not ok or typeof(av) ~= "Vector3" or av.Magnitude < 0.1 then return end
+            vel = av
+            spd = av.Magnitude
+            bp  = ball.Position
+        end
+        if spd < P.MIN_SPD then return end
+        if not bp then return end
+
+        local parryRad = P.DEFLECT_R + leadStuds(spd) + preBufferStuds(spd) + resRadiusBonus(t)
+
+        local hx, hy, hz = hrp.Position.X, hrp.Position.Y, hrp.Position.Z
+        local dx, dy, dz = hx - bp.X, hy - bp.Y, hz - bp.Z
+        if dx*dx + dy*dy + dz*dz > parryRad * parryRad then return end
+
+        if vel and vel.X * dx + vel.Y * dy + vel.Z * dz <= 0 then return end
+
+        if AP.fired then
+            if (t - AP.firedAt) >= P.FIRE_TIMEOUT then AP.fired = false end
+        end
+        if AP.fired then return end
+        if (t - AP.firedAt) < P.FIRE_LOCK then return end
+        if AP.firedAt > Sync.lastAt then return end
+
+        AP.fired, AP.firedAt = true, t
+        if not sendParry() then AP.fired = false end
+    end)
+    _activeConns[#_activeConns + 1] = heartbeatConn
+    Utils.trackCharacter(heartbeatConn)
+
+    local ancestryConn = character.AncestryChanged:Connect(function(_, parent)
+        if not parent then _apBind = _apBind + 1 end
+    end)
+    _activeConns[#_activeConns + 1] = ancestryConn
+    Utils.trackCharacter(ancestryConn)
+end
+
+-- ── public ──────────────────────────────────────────────────────────────────
+
 function AutoParry.setup(deps)
     Probe, GameInfo, Utils = deps.Probe, deps.GameInfo, deps.Utils
     _localUserId = Utils.getLocalPlayer().UserId
     installHitboxHook()
 end
 
-function AutoParry.setOnFired(fn)       _onFired = fn end
-function AutoParry.fire()                return sendParry() end
 function AutoParry.bindParry(character)  bindParry(character) end
 function AutoParry.resetState()          resetState() end
 function AutoParry.onBallSync(data)      onBallSync(data) end
-function AutoParry.resRadiusBonus()       return _resBonusCache end
-function AutoParry.getState()             return AP end
-function AutoParry.getRes()               return RES end
-function AutoParry.getLastFireBallRef()   return RES.lastFireBallRef end
-function AutoParry.getLastFireBallAt()    return RES.lastFireBallAt end
-function AutoParry.getP()                 return P end
-function AutoParry.getPingOneWay()
-    return math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
+function AutoParry.resRadiusBonus()      return _resBonusCache end
+function AutoParry.getPingOneWay()       return pingOneWay() end
+function AutoParry.getSync()             return Sync end
+
+function AutoParry.computeParryRadius(spd, t)
+    return P.DEFLECT_R + leadStuds(spd) + preBufferStuds(spd) + resRadiusBonus(t)
 end
 
 if _G.ExodusModules then _G.ExodusModules.AutoParry = AutoParry end
