@@ -1,6 +1,6 @@
 -- [[ PHANTOM BALL LOGIC ]]
 
-local SCRIPT_VERSION = "22.0"
+local SCRIPT_VERSION = "22.5"
 local SCRIPT_NAME    = "Phantom Ball LOGIC"
 
 local Players    = game:GetService("Players")
@@ -1406,7 +1406,7 @@ track(ws.DescendantAdded:Connect(function(d)
 end))
 
 -- [[ GUI ]]
-local GUI_URL = "https://raw.githubusercontent.com/Repp35/Roblox/refs/heads/main/phantom_gui.lua"
+local GUI_URL = "https://raw.githubusercontent.com/Repp35/Exodus/main/ui-1.luau"
 
 task.spawn(function()
     for _ = 1, 3 do task.defer(samplePing); task.wait(0.2) end
