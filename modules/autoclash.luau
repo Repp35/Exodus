@@ -6,12 +6,10 @@ local GameInfo, Utils, AutoParry
 
 -- tuning
 local C = {
-    -- histerese geométrica: raio de ativação > raio de desativação
-    ACT_MARGIN_MS        = 0.200,  -- margem do raio de ativação  (DEFLECT_R + res + ping + 200ms)
-    DEACT_MARGIN_MS      = 0.100,  -- margem do raio de desativação (DEFLECT_R + res + ping + 100ms)
-    RADIUS_FLOOR         = 14,     -- piso de segurança pros raios efetivos
-    PING_FLOOR           = 0.030,
+    DEACT_CLICK_WINDOW   = 0.100,  -- janela adicional pra evitar flick
+    DEACT_PING_FLOOR     = 0.030,
 
+    ACT_MARGIN_MS        = 0.300,  -- raio de ativação = DEFLECT_R + res + ping + 300ms
     ACT_TIMP_FAST        = 0.085,
 
     TRAJ_DIST_FLOOR      = 0.05,
@@ -53,6 +51,7 @@ local _antidashCooldown  = {}
 local _antidashHooked    = {}
 local _lastDashTrack     = 0
 local _ctxCache          = { t = 0, valid = false }
+local _detRadius         = 0
 
 local SNAPSHOT_TTL       = 0.05
 
@@ -131,10 +130,11 @@ local function updatePeakIfRising(t, dist)
     end
 end
 
-local function tickTrajectory(t, hr, ball, raioAtivacao)
+local function tickTrajectory(t, hr, ball)
     S.detSignal = false
     if not (hr and hr.Parent and ball and ball.Parent) then
         resetTrajState()
+        _detRadius = 0
         return
     end
 
@@ -149,12 +149,18 @@ local function tickTrajectory(t, hr, ball, raioAtivacao)
         dist = math.sqrt(dx * dx + dy * dy + dz * dz)
     end
 
-    local spd = _ctxCache.valid and (_ctxCache.spd or 0) or 0
+    local p      = getP()
+    local baseRad = (p and p.DEFLECT_R or 0) + parryBonus()
+    local spd    = _ctxCache.valid and (_ctxCache.spd or 0) or 0
+    local pingOneWay = AutoParry and AutoParry.getPingOneWay
+        and AutoParry.getPingOneWay()
+        or C.DEACT_PING_FLOOR
+    _detRadius   = baseRad + spd * (pingOneWay + C.ACT_MARGIN_MS)
 
     -- fast-path: bola muito longe E se afastando → só atualiza prevDist
     -- (se está vindo em direção a você mesmo fora do raio, continua processando
     --  pra acompanhar o pico e não perder a inversão quando entrar no raio)
-    if dist > raioAtivacao and S.prevDist then
+    if dist > _detRadius and S.prevDist then
         local delta = dist - S.prevDist
         if delta >= 0 then
             S.prevDist = dist
@@ -200,7 +206,7 @@ local function tickTrajectory(t, hr, ball, raioAtivacao)
             local dtInv       = t - S.atPeak
             local expectedTime = spd > 1 and (traveled / spd) or 0.1
             local ratio       = dtInv / expectedTime
-            if dist <= raioAtivacao and ratio < C.TRAJ_INV_RATIO_MAX then
+            if dist <= _detRadius and ratio < C.TRAJ_INV_RATIO_MAX then
                 S.detSignal = true
             end
         end
@@ -214,6 +220,7 @@ local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.ballGoneSince      = 0
     resetTrajState()
+    _detRadius        = 0
     _ctxCache.valid   = false
 end
 
@@ -222,36 +229,69 @@ local function activateClash(t)
     S.clashAt       = t
     S.ballGoneSince = 0
     resetTrajState()
+    _detRadius      = 0
     _ctxCache.valid = false
 end
 
--- raios efetivos com histerese
--- raioAtivacao  = DEFLECT_R + res + ping + 200ms  (maior, gate pra LIGAR)
--- raioDesativar = DEFLECT_R + res + ping + 100ms  (menor, gate pra DESLIGAR)
-local function getEffectiveRadii(ctx)
-    local p = getP()
-    local baseRad = (p and p.DEFLECT_R or 8.5) + parryBonus()
-    local spd = (ctx and ctx.spd) or 0
-    local pingOneWay = AutoParry and AutoParry.getPingOneWay
-        and AutoParry.getPingOneWay()
-        or C.PING_FLOOR
-
-    local raioAtivacao   = math.max(baseRad + spd * (pingOneWay + C.ACT_MARGIN_MS),   C.RADIUS_FLOOR)
-    local raioDesativar  = math.max(baseRad + spd * (pingOneWay + C.DEACT_MARGIN_MS), C.RADIUS_FLOOR)
-    return raioAtivacao, raioDesativar
-end
-
 -- decisão
-local function shouldActivate(t, ctx, targetJustChangedToMe, raioAtivacao)
+local function shouldDeactivate(t, ctx)
     if not ctx then return false end
 
-    -- barreira geométrica: nada liga se a bola está além do raio de ativação
-    if ctx.bDist > raioAtivacao then return false end
+    local p = getP()
+    local baseRad = (p and p.DEFLECT_R or 8.5) + parryBonus()
+    local spd = ctx.spd or 0
 
-    -- motivos que podem ativar (todos já barrados pelo gate acima)
+    local pingOneWay = AutoParry and AutoParry.getPingOneWay
+        and AutoParry.getPingOneWay()
+        or C.DEACT_PING_FLOOR
+
+    -- raio efetivo: parry + quanto a bola anda até o clique chegar
+    local raioEfetivo = math.max(
+        baseRad + spd * (pingOneWay + C.DEACT_CLICK_WINDOW),
+        14
+    )
+
+    -- velocidade radial raw (reusa toMe cacheado no snapshot)
+    local radialSpd = 0
+    if ctx.toMeMag and ctx.toMeMag > 0.1
+        and ctx.hr and ctx.hr.Parent
+        and ctx.ball and ctx.ball.Parent then
+        local ok, av = pcall(function() return ctx.ball.AssemblyLinearVelocity end)
+        if ok and typeof(av) == "Vector3" and av.Magnitude > 1 then
+            local inv = 1 / ctx.toMeMag
+            radialSpd = (av.X * ctx.toMeX + av.Y * ctx.toMeY + av.Z * ctx.toMeZ) * inv
+        end
+    end
+
+    -- fisicamente fora agora → desativa
+    if ctx.bDist > raioEfetivo then return true end
+
+    -- posição prevista quando o clique chegar ao servidor
+    local futureDist = ctx.bDist - radialSpd * pingOneWay
+
+    -- vai estar fora quando o clique chegar → desativa
+    if futureDist > raioEfetivo then return true end
+
+    return false
+end
+
+local function shouldActivate(t, ctx, targetJustChangedToMe)
+    if not ctx then return false end
+
+    local p = getP()
+    local baseRad = (p and p.DEFLECT_R or 8.5) + parryBonus()
+    local spd = ctx.spd or 0
+    local pingOneWay = AutoParry and AutoParry.getPingOneWay
+        and AutoParry.getPingOneWay()
+        or C.DEACT_PING_FLOOR
+    local actRadius = baseRad + spd * (pingOneWay + C.ACT_MARGIN_MS)
+
+    -- gate geométrico: nada liga se a bola está além do raio de ativação
+    if ctx.bDist > actRadius then return false end
+
     local targeted = ctx.targeted or isTargeted()
 
-    -- anti-dash / panic não exigem ser alvo, mas ainda exigem estar perto
+    -- anti-dash / panic não exigem ser alvo, mas exigem estar perto (gate acima)
     if S.dashAnti.untilT   > t then return true end
     if S.dashPanicUntil    > t then return true end
 
@@ -274,16 +314,14 @@ local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
     end
 
     local ctx = clashSnapshot()
-    local raioAtivacao, raioDesativar = getEffectiveRadii(ctx)
-    tickTrajectory(t, hr, ball, raioAtivacao)
+    tickTrajectory(t, hr, ball)
 
     if S.clashOn then
-        -- bola > raio efetivo de desativação → OFF. Só isso.
-        if ctx.bDist > raioDesativar then clearClash() end
+        if shouldDeactivate(t, ctx) then clearClash() end
         return
     end
 
-    if shouldActivate(t, ctx, targetJustChangedToMe, raioAtivacao) then
+    if shouldActivate(t, ctx, targetJustChangedToMe) then
         activateClash(t)
     end
 end
@@ -450,6 +488,7 @@ function AutoClash.resetState()
     S.lastTarget, S.lastTargetAt = -999, 0
     S.ballGoneSince = 0
     resetTrajState()
+    _detRadius = 0
     table.clear(S.dashEvents)
     S.dashPanicUntil, S.dashAnti = 0, { untilT = 0 }
     _ctxCache.valid = false
