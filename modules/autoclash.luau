@@ -13,7 +13,7 @@ local C = {
     TRAJ_INV_MIN_TRAVEL  = 1.2,
     TRAJ_INV_RATIO_MAX   = 0.4,
 
-    RETURN_TARGET_GAP    = 0.10,
+    RETURN_TARGET_GAP    = 0.16,
     RETURN_TARGET_MAXD   = 60,
 }
 
@@ -37,6 +37,8 @@ local _ctxCache    = { t = 0, valid = false }
 local _detRadius   = 0
 local SNAPSHOT_TTL = 0.05
 
+-- ── helpers ─────────────────────────────────────────────────────────────────
+
 local function parryBonus() return AutoParry and AutoParry.resRadiusBonus and AutoParry.resRadiusBonus() or 0 end
 
 local function getMyHRP()
@@ -46,6 +48,8 @@ local function getMyHRP()
 end
 
 local function isTargeted() return AutoParry and AutoParry.isTargeted and AutoParry.isTargeted() or false end
+
+-- ── ball radial ─────────────────────────────────────────────────────────────
 
 local function ballRadial(ctx)
     if not (ctx and ctx.ball and ctx.ball.Parent
@@ -60,19 +64,12 @@ local function ballRadial(ctx)
     return radial, radial / speed
 end
 
+-- ── base radius ─────────────────────────────────────────────────────────────
+
 local function getBaseRadius(t)
-    if AutoParry and AutoParry.computeParryRadius then
-        local spd = 0
-        local ball = GameInfo.getBall()
-        if ball and ball.Parent then
-            local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-            if ok and typeof(av) == "Vector3" then spd = av.Magnitude end
-        end
-        if spd < 1 then
-            local sync = AutoParry.getSync and AutoParry.getSync() or nil
-            if sync and (t - sync.lastAt) < 0.3 and sync.Speed > 0 then spd = sync.Speed end
-        end
-        return AutoParry.computeParryRadius(spd, t)
+    local ctx = _ctxCache
+    if ctx.valid and ctx.spd ~= nil then
+        return AutoParry.computeParryRadius(ctx.spd, t) + parryBonus()
     end
     return 8.5 + parryBonus()
 end
@@ -107,6 +104,8 @@ local function clashSnapshot()
     _ctxCache.cosToward = cosToward
     return _ctxCache
 end
+
+-- ── trajectory state ────────────────────────────────────────────────────────
 
 local function resetTrajState()
     S.prevDist, S.atPeak, S.peakDist = nil, nil, nil
@@ -212,6 +211,8 @@ local function tickTrajectory(t, hr, ball, ctx)
     end
 end
 
+-- ── clash activation ────────────────────────────────────────────────────────
+
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.ballGoneSince, S.outOfRangeFrames = 0, 0
@@ -247,6 +248,8 @@ local function shouldActivate(t, ctx)
 
     return false
 end
+
+-- ── evaluate ────────────────────────────────────────────────────────────────
 
 local function evaluateClash(t, hr, ball, config)
     if not config or config.AutoClash == false or _G.PhantomManual then
@@ -285,8 +288,11 @@ local function onTarget(newTarget, t)
     if (t - (prevTargetAt or 0)) < C.RETURN_TARGET_GAP then return end
     local ctx = clashSnapshot()
     if not (ctx and ctx.bDist and ctx.bDist <= C.RETURN_TARGET_MAXD) then return end
+    if (ctx.radialSpd or 0) >= -0.5 then return end
     armReturn(t, ctx.bDist)
 end
+
+-- ── public ──────────────────────────────────────────────────────────────────
 
 function AutoClash.setup(deps)
     GameInfo, Utils, AutoParry = deps.GameInfo, deps.Utils, deps.AutoParry
