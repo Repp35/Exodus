@@ -15,6 +15,10 @@ local C = {
     TRAJ_RAD_SPD_K       = 0.15,
     TRAJ_INV_MIN_TRAVEL  = 1.2,
     TRAJ_INV_RATIO_MAX   = 0.4,
+
+    -- pre-activation window: time-to-radius at which the predicted-return path
+    -- is allowed to fire the clash. bigger = earlier. tune later.
+    CLASH_PREACT_TIME    = 0.20,
 }
 
 -- state
@@ -25,6 +29,14 @@ local S = {
     prevDist = nil, atPeak = nil, peakDist = nil,
     derivSign = 0, detSignal = false,
     outOfRangeFrames = 0,
+
+    -- predicted-return state (NEW). survives frames where the ball is far;
+    -- drives the pre-activation path in shouldActivate.
+    returnDetected = false,
+    returnAt       = 0,
+    returnDist     = 0,
+    returnSpeed    = 0,
+    returnRadius   = 0,
 }
 
 local _localUserId = -1
@@ -82,6 +94,16 @@ local function resetTrajState()
     S.derivSign, S.detSignal = 0, false
 end
 
+-- NEW: clear predicted-return state. called whenever the cached return
+-- is no longer trustworthy (clash toggles, target changes, ball gone, etc.)
+local function resetReturnState()
+    S.returnDetected = false
+    S.returnAt       = 0
+    S.returnDist     = 0
+    S.returnSpeed    = 0
+    S.returnRadius   = 0
+end
+
 local function updatePeakIfRising(t, dist)
     if dist > (S.peakDist or 0) then S.atPeak, S.peakDist = t, dist end
 end
@@ -89,13 +111,16 @@ end
 local function tickTrajectory(t, hr, ball)
     S.detSignal = false
     if not (hr and hr.Parent and ball and ball.Parent) then
-        resetTrajState(); _detRadius = 0; return
+        resetTrajState()
+        resetReturnState()  -- NEW: ball missing => any cached return is stale
+        _detRadius = 0
+        return
     end
 
     local dist = _ctxCache.valid and _ctxCache.bDist or nil
     if not dist then
         local hp, bp = hr.Position, ball.Position
-        local dx, dy, dz = hp.X - bp.X, hp.Y - bp.Y, hp.Z - bp.Z
+        local dx, dy, dz = hp.X - bp.X, hp.Y - bp.Y, bp.Z - bp.Z
         dist = math.sqrt(dx * dx + dy * dy + dz * dz)
     end
 
@@ -104,6 +129,9 @@ local function tickTrajectory(t, hr, ball)
     _detRadius = parryR + spd * C.TRAJ_RAD_SPD_K
     _detRadius = math.clamp(_detRadius, C.TRAJ_RAD_FLOOR, C.TRAJ_RAD_CEIL)
 
+    -- outside the detection radius: we only keep an eye on the direction.
+    -- don't reset prevDist here; we still want to track "moving away" so a
+    -- return can be detected even from far away.
     if dist > _detRadius and S.prevDist then
         local delta = dist - S.prevDist
         if delta >= 0 then S.prevDist = dist; return end
@@ -141,12 +169,26 @@ local function tickTrajectory(t, hr, ball)
         if S.atPeak and traveled >= C.TRAJ_INV_MIN_TRAVEL then
             local dtInv = t - S.atPeak
             local expectedTime = spd > 1 and (traveled / spd) or 0.1
+            -- original gate (kept intact, NOT used as the only activation path):
             if dist <= _detRadius and (dtInv / expectedTime) < C.TRAJ_INV_RATIO_MAX then
                 S.detSignal = true
             end
+            -- NEW: store the return even when we're still outside the radius.
+            -- the predicted-activation path will decide when to actually fire.
+            -- we re-use the same ratio test as a "this really looks like a return"
+            -- sanity check, so a fluke sign-flip doesn't arm a pre-activation.
+            if (dtInv / expectedTime) < C.TRAJ_INV_RATIO_MAX then
+                S.returnDetected = true
+                S.returnAt       = t
+                S.returnDist     = dist
+                S.returnSpeed    = spd
+                S.returnRadius   = _detRadius
+            end
         end
     elseif sign == 1 then
+        -- moving away again: a previously cached "return" is no longer valid.
         S.atPeak, S.peakDist = nil, nil
+        resetReturnState()
     end
 end
 
@@ -155,12 +197,14 @@ local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.ballGoneSince, S.outOfRangeFrames = 0, 0
     resetTrajState()
+    resetReturnState()  -- NEW
     _detRadius, _ctxCache.valid = 0, false
 end
 
 local function activateClash(t)
     S.clashOn, S.clashAt, S.ballGoneSince, S.outOfRangeFrames = true, t, 0, 0
     resetTrajState()
+    resetReturnState()  -- NEW: don't let a fired clash leak into the next one
     _detRadius, _ctxCache.valid = 0, false
 end
 
@@ -197,12 +241,36 @@ end
 local function shouldActivate(t, ctx, targetJustChangedToMe)
     local targeted = ctx and ctx.targeted or isTargeted()
     if not targeted then return false end
+
+    -- fast gate: target just flipped to me. unchanged.
     if targetJustChangedToMe and ctx then
         if ctx.bDist <= C.ACT_HARD_CAP and ctx.tImp > 0 and ctx.tImp <= C.ACT_TIMP_FAST then
             return true
         end
     end
-    return S.detSignal
+
+    -- legacy in-radius detector. still here, untouched.
+    if S.detSignal then return true end
+
+    -- NEW: predicted-return path. only fires when:
+    --   * a return was confirmed this match (returnDetected)
+    --   * the ball is currently still approaching (derivSign == -1)
+    --   * the time-to-radius fits inside the pre-activation window
+    if S.returnDetected and S.derivSign == -1 and ctx and ctx.bDist then
+        local radius = S.returnRadius > 0 and S.returnRadius or _detRadius
+        local remaining = ctx.bDist - radius
+        if remaining > 0 then
+            local spd = S.returnSpeed > 0 and S.returnSpeed or (ctx.spd or 0)
+            if spd > 1 then
+                local tToRadius = remaining / spd
+                if tToRadius <= C.CLASH_PREACT_TIME then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
 end
 
 local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
@@ -227,6 +295,9 @@ local function onTarget(newTarget, t)
     local ap = AutoParry and AutoParry.getState and AutoParry.getState() or nil
     if ap then ap.armed = (newTarget == _localUserId) end
     _ctxCache.valid = false
+    -- NEW: when the target changes, any "ball is returning to old target" cache
+    -- is no longer meaningful for the new target.
+    resetReturnState()
 end
 
 -- public
@@ -253,6 +324,7 @@ function AutoClash.resetState()
     S.clashOn, S.clashAt, S.ballGoneSince, S.outOfRangeFrames = false, 0, 0, 0
     S.lastTarget, S.lastTargetAt = -999, 0
     resetTrajState()
+    resetReturnState()  -- NEW
     _detRadius, _ctxCache.valid = 0, false
 end
 
