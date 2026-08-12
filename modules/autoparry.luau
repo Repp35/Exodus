@@ -359,6 +359,7 @@ local function bindParry(character)
         local t = Utils.now()
         if t < _teleportLockUntil then return end
         if Utils.isClashActive() or Utils.isManualSpamActive() then return end
+        if GameInfo.isGrace() then return end
 
         tickResilience(t)
 
@@ -432,4 +433,6 @@ function AutoParry.computeParryRadius(spd, t)
 end
 
 if _G.ExodusModules then _G.ExodusModules.AutoParry = AutoParry end
+return AutoParry
+odusModules then _G.ExodusModules.AutoParry = AutoParry end
 return AutoParry
