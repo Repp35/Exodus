@@ -6,8 +6,10 @@ local GameInfo, Utils, AutoParry
 
 -- tuning
 local C = {
-    DEACT_CLICK_WINDOW   = 0.100,  -- janela adicional pra evitar flick
     DEACT_PING_FLOOR     = 0.030,
+    -- histerese temporal: quantos frames consecutivos fora do raio efetivo
+    -- antes de desativar. protege contra flick sem expandir o raio.
+    DEACT_OUT_FRAMES     = 4,
 
     ACT_HARD_CAP         = 22,
     ACT_TIMP_FAST        = 0.085,
@@ -32,6 +34,7 @@ local S = {
     peakDist      = nil,
     derivSign     = 0,
     detSignal     = false,
+    outOfRangeFrames = 0,
 }
 
 local _localUserId       = -1
@@ -203,6 +206,7 @@ end
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.ballGoneSince      = 0
+    S.outOfRangeFrames   = 0
     resetTrajState()
     _detRadius        = 0
     _ctxCache.valid   = false
@@ -212,6 +216,7 @@ local function activateClash(t)
     S.clashOn       = true
     S.clashAt       = t
     S.ballGoneSince = 0
+    S.outOfRangeFrames = 0
     resetTrajState()
     _detRadius      = 0
     _ctxCache.valid = false
@@ -229,11 +234,9 @@ local function shouldDeactivate(t, ctx)
         and AutoParry.getPingOneWay()
         or C.DEACT_PING_FLOOR
 
-    -- raio efetivo: parry + quanto a bola anda até o clique chegar
-    local raioEfetivo = math.max(
-        baseRad + spd * (pingOneWay + C.DEACT_CLICK_WINDOW),
-        14
-    )
+    -- raio efetivo: parry + quanto a bola anda até o clique chegar.
+    -- NÃO inclui DEACT_CLICK_WINDOW — janela de tolerância é temporal, não espacial.
+    local raioEfetivo = math.max(baseRad + spd * pingOneWay, 14)
 
     -- velocidade radial raw (reusa toMe cacheado no snapshot)
     local radialSpd = 0
@@ -247,16 +250,21 @@ local function shouldDeactivate(t, ctx)
         end
     end
 
-    -- fisicamente fora agora → desativa
-    if ctx.bDist > raioEfetivo then return true end
-
     -- posição prevista quando o clique chegar ao servidor
     local futureDist = ctx.bDist - radialSpd * pingOneWay
 
-    -- vai estar fora quando o clique chegar → desativa
-    if futureDist > raioEfetivo then return true end
+    -- fora agora OU vai estar fora quando o clique chegar?
+    local outNow     = ctx.bDist > raioEfetivo
+    local outAtClick = futureDist   > raioEfetivo
+    local isOut      = outNow or outAtClick
 
-    return false
+    if isOut then
+        S.outOfRangeFrames = S.outOfRangeFrames + 1
+    else
+        S.outOfRangeFrames = 0
+    end
+
+    return S.outOfRangeFrames >= C.DEACT_OUT_FRAMES
 end
 
 local function shouldActivate(t, ctx, targetJustChangedToMe)
@@ -324,6 +332,7 @@ function AutoClash.resetState()
     S.clashOn, S.clashAt = false, 0
     S.lastTarget, S.lastTargetAt = -999, 0
     S.ballGoneSince = 0
+    S.outOfRangeFrames = 0
     resetTrajState()
     _detRadius = 0
     _ctxCache.valid = false
