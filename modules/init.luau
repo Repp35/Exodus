@@ -158,6 +158,76 @@ function Init.start()
     Utils.track(GameInfo.installBallWatcher(Utils.track))
     Utils.track(Probe.bindBallSync(onBallSync, Utils.track))
 
+    -- ── character glue ──────────────────────────────────────────────────────────
+
+    local characterGeneration = 0
+
+    local function resetStates()
+        pcall(AutoParry.resetState)
+        pcall(AutoClash.resetState)
+        pcall(Spam.resetState)
+    end
+
+    local function bindChar(ch, generation)
+        if not (ch and ch.Parent) then return end
+        local hrp = ch:WaitForChild("HumanoidRootPart", 10)
+        if generation ~= characterGeneration or not (hrp and hrp.Parent) then return end
+
+        local dead = false
+        local function deactivate()
+            if dead then return end
+            dead = true
+            resetStates()
+        end
+
+        Utils.trackCharacter(ch.AncestryChanged:Connect(function(_, parent)
+            if not parent then deactivate() end
+        end))
+        local hum = ch:FindFirstChildOfClass("Humanoid")
+        if hum then
+            Utils.trackCharacter(hum.Died:Connect(deactivate))
+        end
+
+        local runService = Utils.getRunService()
+        Utils.trackCharacter(runService.Heartbeat:Connect(function(dt)
+            if generation ~= characterGeneration or dead or not Utils.isActive() then return end
+            if not (ch.Parent and hrp.Parent) then deactivate(); return end
+
+            local t = Utils.now()
+            local ball = GameInfo.getBall()
+            AutoClash.updateDashTrack(t)
+            AutoClash.evaluate(t, hrp, ball, Utils.getConfig() or CONFIG)
+            AutoClash.invalidateSnapshot()
+            Spam.tick(dt)
+        end))
+    end
+
+    local function setupCharacter(character)
+        if not character then return end
+        characterGeneration = characterGeneration + 1
+        local generation = characterGeneration
+        Utils.disconnectCharacterConnections()
+
+        task.defer(function()
+            if generation == characterGeneration and Utils.isActive() then
+                pcall(AutoParry.bindParry, character)
+            end
+        end)
+        task.defer(function()
+            if generation == characterGeneration and Utils.isActive() then
+                pcall(bindChar, character, generation)
+            end
+        end)
+    end
+
+    local lp = Utils.getLocalPlayer()
+    if lp then
+        Utils.track(lp.CharacterAdded:Connect(setupCharacter))
+    end
+    if lp and lp.Character then
+        setupCharacter(lp.Character)
+    end
+
     local function installKeys()
         local UIS = Utils.getUserInputService()
         Utils.track(UIS.InputBegan:Connect(function(input, gpe)
