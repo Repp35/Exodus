@@ -12,6 +12,7 @@ local P = {
     RAD_FLOOR = 14,
     PING_FLOOR = 0.030,
     PING_CAP = 0.150,
+    PRE_RADIUS_MS = 100,
 
     RES_BASE = 0,
     RES_PER_PARRY = 0.225,
@@ -219,9 +220,10 @@ local function bindParry(character)
             _pingOneWayStamp  = t
             pingOneWay         = _pingOneWayCached
         end
+        local preRadius = P.PRE_RADIUS_MS / 1000
         local triggerWindow = pingOneWay + 0.016
 
-        local parryRad  = math.max(P.DEFLECT_R + resRadiusBonus(t), P.RAD_FLOOR)
+        local parryRad  = math.max(P.DEFLECT_R + resRadiusBonus(t), P.RAD_FLOOR) + spd * preRadius
         local detectRad = parryRad + spd * pingOneWay
 
         local hp = hrp.Position
