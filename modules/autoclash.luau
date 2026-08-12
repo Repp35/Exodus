@@ -7,13 +7,9 @@ local GameInfo, Utils, AutoParry
 -- tuning
 local C = {
     DEACT_PING_FLOOR     = 0.030,
-    -- histerese temporal: quantos frames consecutivos fora do raio efetivo
-    -- antes de desativar. protege contra flick sem expandir o raio.
     DEACT_OUT_FRAMES     = 4,
-
     ACT_HARD_CAP         = 22,
     ACT_TIMP_FAST        = 0.085,
-
     TRAJ_DIST_FLOOR      = 0.05,
     TRAJ_RAD_FLOOR       = 18,
     TRAJ_RAD_CEIL        = 45,
@@ -25,23 +21,17 @@ local C = {
 -- state
 local S = {
     lastTarget = -999, lastTargetAt = 0,
-
     clashOn = false, clashAt = 0,
     ballGoneSince = 0,
-
-    prevDist      = nil,
-    atPeak        = nil,
-    peakDist      = nil,
-    derivSign     = 0,
-    detSignal     = false,
+    prevDist = nil, atPeak = nil, peakDist = nil,
+    derivSign = 0, detSignal = false,
     outOfRangeFrames = 0,
 }
 
-local _localUserId       = -1
-local _ctxCache          = { t = 0, valid = false }
-local _detRadius         = 0
-
-local SNAPSHOT_TTL       = 0.05
+local _localUserId = -1
+local _ctxCache    = { t = 0, valid = false }
+local _detRadius   = 0
+local SNAPSHOT_TTL = 0.05
 
 -- utils
 local function getP()       return AutoParry and AutoParry.getP and AutoParry.getP() or nil end
@@ -53,9 +43,7 @@ local function getMyHRP()
     return ch and ch:FindFirstChild("HumanoidRootPart") or nil
 end
 
-local function isTargeted()
-    return GameInfo.isTargeted(S.lastTarget)
-end
+local function isTargeted() return GameInfo.isTargeted(S.lastTarget) end
 
 -- snapshot cache
 local function clashSnapshot()
@@ -72,106 +60,68 @@ local function clashSnapshot()
 
     local tImp, spd = math.huge, 0
     local live = GameInfo.liveTImp()
-    if live then
-        tImp = tonumber(live.tImp) or math.huge
-        spd  = tonumber(live.spd) or 0
-    end
+    if live then tImp = tonumber(live.tImp) or math.huge; spd = tonumber(live.spd) or 0 end
     if spd < 1 then
         local ti, _, s2 = GameInfo.computeTImp(hr, ball, t)
-        tImp = ti or tImp
-        spd  = s2 or spd
+        tImp = ti or tImp; spd = s2 or spd
     end
 
-    local hp = hr.Position
-    local bp = ball.Position
-    local dx = hp.X - bp.X
-    local dy = hp.Y - bp.Y
-    local dz = hp.Z - bp.Z
+    local hp, bp = hr.Position, ball.Position
+    local dx, dy, dz = hp.X - bp.X, hp.Y - bp.Y, hp.Z - bp.Z
     local bDist = math.sqrt(dx * dx + dy * dy + dz * dz)
 
-    _ctxCache.t        = t
-    _ctxCache.valid    = true
-    _ctxCache.hr       = hr
-    _ctxCache.ball     = ball
-    _ctxCache.tImp     = tImp
-    _ctxCache.spd      = spd
-    _ctxCache.bDist    = bDist
+    _ctxCache.t, _ctxCache.valid, _ctxCache.hr, _ctxCache.ball = t, true, hr, ball
+    _ctxCache.tImp, _ctxCache.spd, _ctxCache.bDist = tImp, spd, bDist
     _ctxCache.targeted = isTargeted()
-    -- cache do vetor hr->ball (reusado em EMA)
-    _ctxCache.toMeX    = dx
-    _ctxCache.toMeY    = dy
-    _ctxCache.toMeZ    = dz
-    _ctxCache.toMeMag  = bDist
+    _ctxCache.toMeX, _ctxCache.toMeY, _ctxCache.toMeZ, _ctxCache.toMeMag = dx, dy, dz, bDist
     return _ctxCache
 end
 
--- trajectory detector → detSignal ativa o clash
+-- trajectory detector
 local function resetTrajState()
     S.prevDist, S.atPeak, S.peakDist = nil, nil, nil
-    S.derivSign                      = 0
-    S.detSignal                      = false
+    S.derivSign, S.detSignal = 0, false
 end
 
 local function updatePeakIfRising(t, dist)
-    if dist > (S.peakDist or 0) then
-        S.atPeak, S.peakDist = t, dist
-    end
+    if dist > (S.peakDist or 0) then S.atPeak, S.peakDist = t, dist end
 end
 
 local function tickTrajectory(t, hr, ball)
     S.detSignal = false
     if not (hr and hr.Parent and ball and ball.Parent) then
-        resetTrajState()
-        _detRadius = 0
-        return
+        resetTrajState(); _detRadius = 0; return
     end
 
-    -- usa o snapshot cacheado quando válido (mesma idade < SNAPSHOT_TTL)
     local dist = _ctxCache.valid and _ctxCache.bDist or nil
     if not dist then
-        local hp = hr.Position
-        local bp = ball.Position
-        local dx = hp.X - bp.X
-        local dy = hp.Y - bp.Y
-        local dz = hp.Z - bp.Z
+        local hp, bp = hr.Position, ball.Position
+        local dx, dy, dz = hp.X - bp.X, hp.Y - bp.Y, hp.Z - bp.Z
         dist = math.sqrt(dx * dx + dy * dy + dz * dz)
     end
 
-    local p     = getP()
-    local parryR = (p and p.DEFLECT_R or 0) + parryBonus()
-    local spd   = _ctxCache.valid and (_ctxCache.spd or 0) or 0
-    _detRadius  = parryR + spd * C.TRAJ_RAD_SPD_K
-    if _detRadius < C.TRAJ_RAD_FLOOR then _detRadius = C.TRAJ_RAD_FLOOR
-    elseif _detRadius > C.TRAJ_RAD_CEIL then _detRadius = C.TRAJ_RAD_CEIL end
+    local p, parryR = getP(), (getP() and getP().DEFLECT_R or 0) + parryBonus()
+    local spd = _ctxCache.valid and (_ctxCache.spd or 0) or 0
+    _detRadius = parryR + spd * C.TRAJ_RAD_SPD_K
+    _detRadius = math.clamp(_detRadius, C.TRAJ_RAD_FLOOR, C.TRAJ_RAD_CEIL)
 
-    -- fast-path: bola muito longe E se afastando → só atualiza prevDist
-    -- (se está vindo em direção a você mesmo fora do raio, continua processando
-    --  pra acompanhar o pico e não perder a inversão quando entrar no raio)
     if dist > _detRadius and S.prevDist then
         local delta = dist - S.prevDist
-        if delta >= 0 then
-            S.prevDist = dist
-            return
-        end
+        if delta >= 0 then S.prevDist = dist; return end
     end
 
     if S.prevDist == nil then
-        S.prevDist = dist
-        S.atPeak, S.peakDist = t, dist
+        S.prevDist, S.atPeak, S.peakDist = dist, t, dist
         return
     end
 
     local delta = dist - S.prevDist
-    S.prevDist  = dist
+    S.prevDist = dist
 
     local sign
-    if delta > C.TRAJ_DIST_FLOOR then
-        sign = 1
-    elseif delta < -C.TRAJ_DIST_FLOOR then
-        sign = -1
-    else
-        sign = S.derivSign
-    end
+    if delta > C.TRAJ_DIST_FLOOR then sign = 1
+    elseif delta < -C.TRAJ_DIST_FLOOR then sign = -1
+    else sign = S.derivSign end
 
     if S.derivSign == 0 then
         S.derivSign = sign
@@ -185,15 +135,14 @@ local function tickTrajectory(t, hr, ball)
     end
 
     local prevSign = S.derivSign
-    S.derivSign    = sign
+    S.derivSign = sign
 
     if prevSign == 1 and sign == -1 then
         local traveled = (S.peakDist or 0) - dist
         if S.atPeak and traveled >= C.TRAJ_INV_MIN_TRAVEL then
-            local dtInv       = t - S.atPeak
+            local dtInv = t - S.atPeak
             local expectedTime = spd > 1 and (traveled / spd) or 0.1
-            local ratio       = dtInv / expectedTime
-            if dist <= _detRadius and ratio < C.TRAJ_INV_RATIO_MAX then
+            if dist <= _detRadius and (dtInv / expectedTime) < C.TRAJ_INV_RATIO_MAX then
                 S.detSignal = true
             end
         end
@@ -205,21 +154,15 @@ end
 -- clash transitions
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
-    S.ballGoneSince      = 0
-    S.outOfRangeFrames   = 0
+    S.ballGoneSince, S.outOfRangeFrames = 0, 0
     resetTrajState()
-    _detRadius        = 0
-    _ctxCache.valid   = false
+    _detRadius, _ctxCache.valid = 0, false
 end
 
 local function activateClash(t)
-    S.clashOn       = true
-    S.clashAt       = t
-    S.ballGoneSince = 0
-    S.outOfRangeFrames = 0
+    S.clashOn, S.clashAt, S.ballGoneSince, S.outOfRangeFrames = true, t, 0, 0
     resetTrajState()
-    _detRadius      = 0
-    _ctxCache.valid = false
+    _detRadius, _ctxCache.valid = 0, false
 end
 
 -- decisão
@@ -231,54 +174,36 @@ local function shouldDeactivate(t, ctx)
     local spd = ctx.spd or 0
 
     local pingOneWay = AutoParry and AutoParry.getPingOneWay
-        and AutoParry.getPingOneWay()
-        or C.DEACT_PING_FLOOR
+        and AutoParry.getPingOneWay() or C.DEACT_PING_FLOOR
 
-    -- raio efetivo: parry + quanto a bola anda até o clique chegar.
-    -- NÃO inclui DEACT_CLICK_WINDOW — janela de tolerância é temporal, não espacial.
     local raioEfetivo = math.max(baseRad + spd * pingOneWay, 14)
 
-    -- velocidade radial raw (reusa toMe cacheado no snapshot)
     local radialSpd = 0
     if ctx.toMeMag and ctx.toMeMag > 0.1
         and ctx.hr and ctx.hr.Parent
         and ctx.ball and ctx.ball.Parent then
         local ok, av = pcall(function() return ctx.ball.AssemblyLinearVelocity end)
         if ok and typeof(av) == "Vector3" and av.Magnitude > 1 then
-            local inv = 1 / ctx.toMeMag
-            radialSpd = (av.X * ctx.toMeX + av.Y * ctx.toMeY + av.Z * ctx.toMeZ) * inv
+            radialSpd = (av.X * ctx.toMeX + av.Y * ctx.toMeY + av.Z * ctx.toMeZ) / ctx.toMeMag
         end
     end
 
-    -- posição prevista quando o clique chegar ao servidor
     local futureDist = ctx.bDist - radialSpd * pingOneWay
+    local isOut = ctx.bDist > raioEfetivo or futureDist > raioEfetivo
 
-    -- fora agora OU vai estar fora quando o clique chegar?
-    local outNow     = ctx.bDist > raioEfetivo
-    local outAtClick = futureDist   > raioEfetivo
-    local isOut      = outNow or outAtClick
-
-    if isOut then
-        S.outOfRangeFrames = S.outOfRangeFrames + 1
-    else
-        S.outOfRangeFrames = 0
-    end
-
+    S.outOfRangeFrames = isOut and (S.outOfRangeFrames + 1) or 0
     return S.outOfRangeFrames >= C.DEACT_OUT_FRAMES
 end
 
 local function shouldActivate(t, ctx, targetJustChangedToMe)
     local targeted = ctx and ctx.targeted or isTargeted()
     if not targeted then return false end
-
     if targetJustChangedToMe and ctx then
         if ctx.bDist <= C.ACT_HARD_CAP and ctx.tImp > 0 and ctx.tImp <= C.ACT_TIMP_FAST then
             return true
         end
     end
-
-    if S.detSignal then return true end
-    return false
+    return S.detSignal
 end
 
 local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
@@ -294,10 +219,7 @@ local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
         if shouldDeactivate(t, ctx) then clearClash() end
         return
     end
-
-    if shouldActivate(t, ctx, targetJustChangedToMe) then
-        activateClash(t)
-    end
+    if shouldActivate(t, ctx, targetJustChangedToMe) then activateClash(t) end
 end
 
 local function onTarget(newTarget, t)
@@ -322,26 +244,20 @@ function AutoClash.evaluate(t, hr, ball, config, targetJustChangedToMe)
 end
 function AutoClash.updateDashTrack(t)         end
 function AutoClash.installAntiDashHooks()     end
-function AutoClash.getState()                 return S end
-function AutoClash.clashOn()                  return S.clashOn end
-function AutoClash.getClashAt()               return S.clashAt end
-function AutoClash.snapshot()                 return clashSnapshot() end
-function AutoClash.invalidateSnapshot()       _ctxCache.valid = false end
+function AutoClash.getState()           return S end
+function AutoClash.clashOn()            return S.clashOn end
+function AutoClash.getClashAt()         return S.clashAt end
+function AutoClash.snapshot()           return clashSnapshot() end
+function AutoClash.invalidateSnapshot() _ctxCache.valid = false end
 
 function AutoClash.resetState()
-    S.clashOn, S.clashAt = false, 0
+    S.clashOn, S.clashAt, S.ballGoneSince, S.outOfRangeFrames = false, 0, 0, 0
     S.lastTarget, S.lastTargetAt = -999, 0
-    S.ballGoneSince = 0
-    S.outOfRangeFrames = 0
     resetTrajState()
-    _detRadius = 0
-    _ctxCache.valid = false
+    _detRadius, _ctxCache.valid = 0, false
 end
 
 function AutoClash.forceClear() clearClash() end
 
-if _G.ExodusModules then
-    _G.ExodusModules.AutoClash = AutoClash
-end
-
+if _G.ExodusModules then _G.ExodusModules.AutoClash = AutoClash end
 return AutoClash
