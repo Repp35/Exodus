@@ -166,10 +166,15 @@ local function tickTrajectory(t, hr, ball)
     if _detRadius < C.TRAJ_RAD_FLOOR then _detRadius = C.TRAJ_RAD_FLOOR
     elseif _detRadius > C.TRAJ_RAD_CEIL then _detRadius = C.TRAJ_RAD_CEIL end
 
-    -- fast-path: bola muito longe, não processa (só mantém prevDist atualizado)
+    -- fast-path: bola muito longe E se afastando → só atualiza prevDist
+    -- (se está vindo em direção a você mesmo fora do raio, continua processando
+    --  pra acompanhar o pico e não perder a inversão quando entrar no raio)
     if dist > _detRadius and S.prevDist then
-        S.prevDist = dist
-        return
+        local delta = dist - S.prevDist
+        if delta >= 0 then
+            S.prevDist = dist
+            return
+        end
     end
 
     if S.prevDist == nil then
