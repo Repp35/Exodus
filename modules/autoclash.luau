@@ -3,8 +3,6 @@
 local AutoClash = {}
 local GameInfo, Utils, AutoParry
 
--- ── tuning ──────────────────────────────────────────────────────────────────
-
 local C = {
     DEACT_OUT_FRAMES     = 2,
 
@@ -18,8 +16,6 @@ local C = {
     RETURN_TARGET_GAP    = 0.10,
     RETURN_TARGET_MAXD   = 60,
 }
-
--- ── state ───────────────────────────────────────────────────────────────────
 
 local S = {
     lastTarget = -999, lastTargetAt = 0,
@@ -40,8 +36,6 @@ local _localUserId = -1
 local _ctxCache    = { t = 0, valid = false }
 local _detRadius   = 0
 local SNAPSHOT_TTL = 0.05
-
--- ── utils ───────────────────────────────────────────────────────────────────
 
 local function parryBonus() return AutoParry and AutoParry.resRadiusBonus and AutoParry.resRadiusBonus() or 0 end
 
@@ -66,7 +60,6 @@ local function ballRadial(ctx)
     return radial, radial / speed
 end
 
--- unified radius: DEFLECT_R + leadStuds + preBufferStuds + resBonus
 local function getBaseRadius(t)
     if AutoParry and AutoParry.computeParryRadius then
         local spd = 0
@@ -83,8 +76,6 @@ local function getBaseRadius(t)
     end
     return 8.5 + parryBonus()
 end
-
--- ── snapshot cache ──────────────────────────────────────────────────────────
 
 local function clashSnapshot()
     local t = Utils.now()
@@ -116,8 +107,6 @@ local function clashSnapshot()
     _ctxCache.cosToward = cosToward
     return _ctxCache
 end
-
--- ── trajectory detector ─────────────────────────────────────────────────────
 
 local function resetTrajState()
     S.prevDist, S.atPeak, S.peakDist = nil, nil, nil
@@ -223,8 +212,6 @@ local function tickTrajectory(t, hr, ball, ctx)
     end
 end
 
--- ── clash transitions ───────────────────────────────────────────────────────
-
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.ballGoneSince, S.outOfRangeFrames = 0, 0
@@ -239,8 +226,6 @@ local function activateClash(t)
     resetReturnState()
     _detRadius, _ctxCache.valid = 0, false
 end
-
--- ── decision ────────────────────────────────────────────────────────────────
 
 local function shouldDeactivate(t, ctx)
     if not ctx then return false end
@@ -281,8 +266,6 @@ local function evaluateClash(t, hr, ball, config)
     if shouldActivate(t, ctx) then activateClash(t) end
 end
 
--- ── targeting ───────────────────────────────────────────────────────────────
-
 local function onTarget(newTarget, t)
     if type(newTarget) ~= "number" then return end
     local prevTarget, prevTargetAt = S.lastTarget, S.lastTargetAt
@@ -305,8 +288,6 @@ local function onTarget(newTarget, t)
     armReturn(t, ctx.bDist)
 end
 
--- ── public ──────────────────────────────────────────────────────────────────
-
 function AutoClash.setup(deps)
     GameInfo, Utils, AutoParry = deps.GameInfo, deps.Utils, deps.AutoParry
     _localUserId = Utils.getLocalPlayer().UserId
@@ -325,6 +306,12 @@ function AutoClash.clashOn()        return S.clashOn end
 function AutoClash.getClashAt()     return S.clashAt end
 function AutoClash.snapshot()       return clashSnapshot() end
 function AutoClash.invalidateSnapshot() _ctxCache.valid = false end
+
+function AutoClash.onBallSync(data)
+    if typeof(data) ~= "table" then return end
+    local t = Utils.now()
+    onTarget(data.TargetPlayerID or -999, t)
+end
 
 function AutoClash.resetState()
     S.clashOn, S.clashAt, S.ballGoneSince, S.outOfRangeFrames = false, 0, 0, 0
