@@ -83,6 +83,43 @@ local _hitboxConn        = nil
 
 local _pbCache = { ms = -1, ping = -1, jitter = -1, var = -1 }
 
+-- ── target check ────────────────────────────────────────────────────────────
+
+local _br = nil
+local _brTried = false
+local function _ensureBR()
+    if _brTried then return _br end
+    _brTried = true
+    pcall(function()
+        local ts = game:GetService("ReplicatedStorage"):FindFirstChild("TS")
+        if not ts then return end
+        local brMod = ts:FindFirstChild("BallReplicator")
+            and ts.BallReplicator:FindFirstChild("BallReplicator")
+        if brMod then
+            local ok, mod = pcall(require, brMod)
+            if ok and mod and mod.BallReplicator then
+                _br = mod.BallReplicator
+            end
+        end
+    end)
+    return _br
+end
+
+local function tgtOn()
+    local ok, ws = pcall(function() return game:GetService("Workspace") end)
+    if ok and ws and ws:GetAttribute("GameBallTarget") == _localUserId then
+        return true
+    end
+    local br = _ensureBR()
+    if br and br.syncData and br.syncData.HighlightTargetPlayerID == _localUserId then
+        return true
+    end
+    if Sync.Target == _localUserId then
+        return true
+    end
+    return false
+end
+
 -- ── ping ────────────────────────────────────────────────────────────────────
 
 local Stats = game:GetService("Stats")
@@ -330,8 +367,7 @@ local function bindParry(character)
 
         local ball = GameInfo.getBall()
         if not (ball and ball.Parent) then return end
-        if not GameInfo.isTargeted(_lastTargetSeen) then return end
-        if Sync.Target ~= -999 and Sync.Target ~= _localUserId then return end
+        if not tgtOn() then return end
 
         local spd, vel, bp
         local syncFresh = (t - Sync.lastAt) < P.SYNC_FRESH
