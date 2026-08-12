@@ -5,7 +5,7 @@ local Probe, GameInfo, Utils
 
 -- tunings
 local P = {
-    FIRE_LOCK = 0.080,
+    FIRE_LOCK = 0.030,
     FIRE_TIMEOUT = 2.0,
     MIN_SPD = 5,
     DEFLECT_R = 8.5,
