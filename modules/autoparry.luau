@@ -69,6 +69,10 @@ local _pingTimer  = 0
 local PING_SAMPLE = 1.5    -- amostra a cada 1.5s
 local PING_EMA    = 0.3    -- suavização
 
+-- cache do ping one-way (atualiza a cada 0.25s)
+local _pingOneWayCached = 0.030
+local _pingOneWayStamp  = 0
+
 -- amostragem de ping via Roblox Stats
 local Stats = game:GetService("Stats")
 local function samplePing()
@@ -81,8 +85,13 @@ local function samplePing()
 end
 
 -- resiliência
-local function resRadiusBonus()
-    return math.min(RES.stack * P.RES_PER_PARRY, P.RES_CAP)
+local _resBonusCache = 0
+local _resBonusStamp = -1
+local function resRadiusBonus(t)
+    if t == _resBonusStamp then return _resBonusCache end
+    _resBonusCache = math.min(RES.stack * P.RES_PER_PARRY, P.RES_CAP)
+    _resBonusStamp = t
+    return _resBonusCache
 end
 
 local function tickResilience(t)
@@ -140,6 +149,8 @@ local function resetState()
     RES.lastStackAt = 0
     _teleportLockUntil = 0
     _lastTargetSeen = -999
+    _resBonusCache = 0
+    _resBonusStamp = -1
 end
 
 -- desconecta todas as conexões ativas (anti-vazamento de heartbeat em respawn)
@@ -249,27 +260,36 @@ local function bindParry(character)
                 end
 
                 -- ping one-way suavizado (piso/teto) + folga de 1 frame pro jitter
-                local pingOneWay = math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
+                local pingOneWay = _pingOneWayCached
+                if t - _pingOneWayStamp > 0.25 then
+                    _pingOneWayCached = math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
+                    _pingOneWayStamp  = t
+                    pingOneWay         = _pingOneWayCached
+                end
                 local triggerWindow = pingOneWay + 0.016
 
-                -- raio físico real do servidor (sem lead — o lead vai no tempo de decisão)
-                local parryRad = math.max(P.DEFLECT_R + resRadiusBonus(), P.RAD_FLOOR)
-                -- raio expandido pra começar a monitorar a bola cedo o suficiente
+                -- cache local do raio (res muda devagar, recalcula só a cada 0.2s)
+                local bonus = resRadiusBonus(t)
+                local parryRad  = P.DEFLECT_R + bonus
+                if parryRad < P.RAD_FLOOR then parryRad = P.RAD_FLOOR end
                 local detectRad = parryRad + spd * pingOneWay
 
-                local dx = hrp.Position.X - bp.X
-                local dy = hrp.Position.Y - bp.Y
-                local dz = hrp.Position.Z - bp.Z
-                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                local hp = hrp.Position
+                local dx = hp.X - bp.X
+                local dy = hp.Y - bp.Y
+                local dz = hp.Z - bp.Z
+                local dist = dx * dx + dy * dy + dz * dz
 
                 -- fora da zona expandida: nem monitora
-                if dist > detectRad then
+                if dist > detectRad * detectRad then
                     AP.wasInRange, AP.inRangeEnterAt = false, 0
                     return
                 end
+                dist = math.sqrt(dist)
 
                 -- tImp: tempo estimado até a bola entrar no raio físico real
-                local tImp = math.max((dist - parryRad) / spd, 0)
+                local tImp = (dist - parryRad) / spd
+                if tImp < 0 then tImp = 0 end
                 if tImp > triggerWindow then
                     return
                 end
@@ -345,7 +365,7 @@ function AutoParry.onBallSync(data)
 end
 
 function AutoParry.resRadiusBonus()
-    return resRadiusBonus()
+    return _resBonusCache
 end
 
 function AutoParry.getState()
