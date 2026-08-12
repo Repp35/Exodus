@@ -104,14 +104,26 @@ local function clashSnapshot()
         spd  = s2 or spd
     end
 
+    local hp = hr.Position
+    local bp = ball.Position
+    local dx = hp.X - bp.X
+    local dy = hp.Y - bp.Y
+    local dz = hp.Z - bp.Z
+    local bDist = math.sqrt(dx * dx + dy * dy + dz * dz)
+
     _ctxCache.t        = t
     _ctxCache.valid    = true
     _ctxCache.hr       = hr
     _ctxCache.ball     = ball
     _ctxCache.tImp     = tImp
     _ctxCache.spd      = spd
-    _ctxCache.bDist    = (hr.Position - ball.Position).Magnitude
+    _ctxCache.bDist    = bDist
     _ctxCache.targeted = isTargeted()
+    -- cache do vetor hr->ball (reusado em EMA)
+    _ctxCache.toMeX    = dx
+    _ctxCache.toMeY    = dy
+    _ctxCache.toMeZ    = dz
+    _ctxCache.toMeMag  = bDist
     return _ctxCache
 end
 
@@ -136,11 +148,29 @@ local function tickTrajectory(t, hr, ball)
         return
     end
 
-    local dist  = (hr.Position - ball.Position).Magnitude
+    -- usa o snapshot cacheado quando válido (mesma idade < SNAPSHOT_TTL)
+    local dist = _ctxCache.valid and _ctxCache.bDist or nil
+    if not dist then
+        local hp = hr.Position
+        local bp = ball.Position
+        local dx = hp.X - bp.X
+        local dy = hp.Y - bp.Y
+        local dz = hp.Z - bp.Z
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    end
+
     local p     = getP()
     local parryR = (p and p.DEFLECT_R or 0) + parryBonus()
     local spd   = _ctxCache.valid and (_ctxCache.spd or 0) or 0
-    _detRadius  = math.clamp(parryR + spd * C.TRAJ_RAD_SPD_K, C.TRAJ_RAD_FLOOR, C.TRAJ_RAD_CEIL)
+    _detRadius  = parryR + spd * C.TRAJ_RAD_SPD_K
+    if _detRadius < C.TRAJ_RAD_FLOOR then _detRadius = C.TRAJ_RAD_FLOOR
+    elseif _detRadius > C.TRAJ_RAD_CEIL then _detRadius = C.TRAJ_RAD_CEIL end
+
+    -- fast-path: bola muito longe, não processa (só mantém prevDist atualizado)
+    if dist > _detRadius and S.prevDist then
+        S.prevDist = dist
+        return
+    end
 
     if S.prevDist == nil then
         S.prevDist = dist
@@ -224,15 +254,15 @@ local function shouldDeactivate(t, ctx)
     local spd = ctx.spd or 0
     if spd < 1 then return false end
 
-    -- velocidade radial com EMA
+    -- velocidade radial com EMA (reusa toMe cacheado no snapshot)
     local radialSpd = 0
-    if ctx.hr and ctx.hr.Parent and ctx.ball and ctx.ball.Parent then
+    if ctx.toMeMag and ctx.toMeMag > 0.1
+        and ctx.hr and ctx.hr.Parent
+        and ctx.ball and ctx.ball.Parent then
         local ok, av = pcall(function() return ctx.ball.AssemblyLinearVelocity end)
         if ok and typeof(av) == "Vector3" and av.Magnitude > 1 then
-            local toMe = ctx.hr.Position - ctx.ball.Position
-            if toMe.Magnitude > 0.1 then
-                radialSpd = av:Dot(toMe.Unit)
-            end
+            local inv = 1 / ctx.toMeMag
+            radialSpd = (av.X * ctx.toMeX + av.Y * ctx.toMeY + av.Z * ctx.toMeZ) * inv
         end
     end
     S.radialSpdEma = S.radialSpdEma * (1 - C.DEACT_RADIAL_EMA) + radialSpd * C.DEACT_RADIAL_EMA
