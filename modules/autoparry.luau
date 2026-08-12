@@ -434,5 +434,3 @@ end
 
 if _G.ExodusModules then _G.ExodusModules.AutoParry = AutoParry end
 return AutoParry
-odusModules then _G.ExodusModules.AutoParry = AutoParry end
-return AutoParry
