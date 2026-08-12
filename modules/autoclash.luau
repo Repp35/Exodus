@@ -45,7 +45,7 @@ local function getMyHRP()
     return ch and ch:FindFirstChild("HumanoidRootPart") or nil
 end
 
-local function isTargeted() return GameInfo.isTargeted(S.lastTarget) end
+local function isTargeted() return AutoParry and AutoParry.isTargeted and AutoParry.isTargeted() or false end
 
 local function ballRadial(ctx)
     if not (ctx and ctx.ball and ctx.ball.Parent
