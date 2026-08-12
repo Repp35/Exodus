@@ -312,6 +312,8 @@ end
 function AutoClash.evaluate(t, hr, ball, config, targetJustChangedToMe)
     evaluateClash(t, hr, ball, config, targetJustChangedToMe)
 end
+function AutoClash.updateDashTrack(t)         end
+function AutoClash.installAntiDashHooks()     end
 function AutoClash.getState()                 return S end
 function AutoClash.clashOn()                  return S.clashOn end
 function AutoClash.getClashAt()               return S.clashAt end
