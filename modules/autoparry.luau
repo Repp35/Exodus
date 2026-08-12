@@ -3,6 +3,7 @@
 local AutoParry = {}
 local Probe, GameInfo, Utils
 
+-- tunings
 local P = {
     FIRE_LOCK = 0.080,
     FIRE_TIMEOUT = 2.0,
@@ -22,6 +23,7 @@ local P = {
     RES_HITBOX_GAP = 0.4,
 }
 
+-- estado ap
 local AP = {
     armed = false,
     fired = false,
@@ -30,6 +32,7 @@ local AP = {
 
 local _activeConns = {}
 
+-- estado res
 local RES = {
     stack = 0,
     lastFireBallRef = nil,
@@ -44,6 +47,7 @@ local _localUserId = -1
 local _onFired = nil
 local _lastTargetSeen = -999
 
+-- estado de ping
 local _smoothPing = 0.060
 local _pingTimer  = 0
 local PING_SAMPLE = 1.5
@@ -72,10 +76,6 @@ local function resRadiusBonus(t)
     return _resBonusCache
 end
 
-local function resMaxStack()
-    return math.floor((P.RES_CAP - P.RES_BASE) / P.RES_PER_PARRY)
-end
-
 local function tickResilience(t)
     if RES.stack <= 0 then return end
     local since = t - RES.lastStackAt
@@ -86,7 +86,10 @@ local function tickResilience(t)
     if since > P.RES_HOLD_T then
         local frac = 1 - (since - P.RES_HOLD_T) / P.RES_DECAY_T
         if frac <= 0 then RES.stack = 0
-        else RES.stack = math.floor(RES.stack * frac + 0.5) end
+        else
+            local decayed = math.floor(RES.stack * frac + 0.5)
+            if decayed ~= RES.stack then RES.stack = decayed end
+        end
     end
 end
 
@@ -183,7 +186,7 @@ local function bindParry(character)
         end
         local triggerWindow = pingOneWay + 0.016
 
-        local parryRad = math.max(P.DEFLECT_R + resRadiusBonus(t), P.RAD_FLOOR)
+        local parryRad  = math.max(P.DEFLECT_R + resRadiusBonus(t), P.RAD_FLOOR)
         local detectRad = parryRad + spd * pingOneWay
 
         local hp = hrp.Position
@@ -193,15 +196,20 @@ local function bindParry(character)
         if dist > detectRad * detectRad then return end
         dist = math.sqrt(dist)
 
-        local tImp = math.max((dist - parryRad) / spd, 0)
+        local tImp = (dist - parryRad) / spd
+        if tImp < 0 then tImp = 0 end
         if tImp > triggerWindow then return end
         if getDeflectCD() > 0 then return end
 
-        if AP.fired and (t - AP.firedAt) < P.FIRE_LOCK then return end
-        AP.fired = false
-
+        if AP.fired then
+            if (t - AP.firedAt) < P.FIRE_LOCK then return end
+            if (t - AP.firedAt) < P.FIRE_TIMEOUT then return end
+            AP.fired = false
+        end
         if sendParry() then
             AP.fired, AP.firedAt = true, t
+        else
+            AP.fired = false
         end
     end)
     _activeConns[#_activeConns + 1] = heartbeatConn
@@ -228,7 +236,7 @@ local function installHitboxHook()
         if (RES.lastFireBallRef.Position - d.Position).Magnitude > P.RES_HITBOX_PROX then return end
         RES.lastHitboxAt, RES.lastStackAt = t, t
         RES.stack = RES.stack + 1
-        local cap = resMaxStack()
+        local cap = math.floor((P.RES_CAP - P.RES_BASE) / P.RES_PER_PARRY)
         if RES.stack > cap then RES.stack = cap end
     end)
     table.insert(_activeConns, _hitboxConn)
@@ -240,8 +248,8 @@ function AutoParry.setup(deps)
     installHitboxHook()
 end
 
-function AutoParry.setOnFired(fn)        _onFired = fn end
-function AutoParry.fire()                 return sendParry() end
+function AutoParry.setOnFired(fn)       _onFired = fn end
+function AutoParry.fire()                return sendParry() end
 function AutoParry.bindParry(character)  bindParry(character) end
 function AutoParry.resetState()          resetState() end
 function AutoParry.onBallSync(data)      onBallSync(data) end
