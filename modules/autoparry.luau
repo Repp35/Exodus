@@ -12,7 +12,7 @@ local Utils
 local P = {
     FIRE_LOCK = 0.080,
     FIRE_TIMEOUT = 2.0,
-    MIN_SPD = 3,
+    MIN_SPD = 5,
     DEFLECT_R = 8.5,
     RAD_FLOOR = 14,
     LEAD_CAP = 80,
