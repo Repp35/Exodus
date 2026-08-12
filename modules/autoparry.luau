@@ -5,7 +5,7 @@ local Probe, GameInfo, Utils
 
 -- tunings
 local P = {
-    FIRE_LOCK = 0.030,
+    FIRE_LOCK = 0.080,
     FIRE_TIMEOUT = 2.0,
     MIN_SPD = 5,
     DEFLECT_R = 8.5,
@@ -25,7 +25,10 @@ local P = {
 
 -- estado ap
 local AP = {
-    armed = false,
+    armed = false,        -- condições de parry bateram, esperando CD zerar
+    armedBall = nil,      -- ball ref usada no momento do arm (pra invalidação)
+    armedAt = 0,
+    armedSig = nil,
     fired = false,
     firedAt = 0,
 }
@@ -105,7 +108,8 @@ local function sendParry()
 end
 
 local function resetState()
-    AP.armed, AP.fired, AP.firedAt = false, false, 0
+    AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
+    AP.fired, AP.firedAt = false, 0
     RES.stack, RES.lastFireBallRef, RES.lastFireBallAt, RES.lastHitboxAt, RES.lastStackAt = 0, nil, 0, 0, 0
     _teleportLockUntil, _lastTargetSeen = 0, -999
     _resBonusCache, _resBonusStamp = 0, -1
@@ -155,16 +159,47 @@ local function bindParry(character)
         if currentBindId ~= _apBind or not (character.Parent and hrp.Parent) then return end
         local Config = Utils.getConfig()
         if not Config or Config.AutoParry ~= true then
+            AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
             AP.fired = false
             return
         end
         local t = Utils.now()
-        if t < _teleportLockUntil then return end
+        if t < _teleportLockUntil then
+            AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
+            return
+        end
         if Utils.isClashActive() or Utils.isManualSpamActive() then return end
         tickResilience(t)
 
         _pingTimer = _pingTimer + dt
         if _pingTimer >= PING_SAMPLE then _pingTimer = 0; samplePing() end
+
+        -- fast path: armado, esperando CD zerar (sem timeout, só desarma se target mudar)
+        if AP.armed then
+            local curBall = GameInfo.getBall()
+            local stillTargeted = GameInfo.isTargeted(_lastTargetSeen)
+            local ballAlive = AP.armedBall and AP.armedBall.Parent ~= nil
+            local sameBall = (curBall == AP.armedBall)
+            if not (stillTargeted and ballAlive and sameBall) then
+                -- target mudou / bola sumiu / bola trocou → desarma
+                AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
+            elseif getDeflectCD() <= 0 then
+                -- CD zerou: dispara instantaneamente
+                if AP.fired then
+                    if (t - AP.firedAt) >= P.FIRE_TIMEOUT then AP.fired = false end
+                end
+                if not AP.fired then
+                    if sendParry() then
+                        AP.fired, AP.firedAt = true, t
+                    end
+                end
+                AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
+                return
+            else
+                -- ainda em CD, mantém armado e espera o próximo frame
+                return
+            end
+        end
 
         local ball = GameInfo.getBall()
         if not (ball and ball.Parent) then return end
@@ -199,7 +234,15 @@ local function bindParry(character)
         local tImp = (dist - parryRad) / spd
         if tImp < 0 then tImp = 0 end
         if tImp > triggerWindow then return end
-        if getDeflectCD() > 0 then return end
+
+        -- cooldown gate: se tá em CD, ARMA em vez de descartar
+        if getDeflectCD() > 0 then
+            AP.armed = true
+            AP.armedBall = ball
+            AP.armedAt = t
+            AP.armedSig = true -- marcado; a checagem de validade usa armedBall
+            return
+        end
 
         if AP.fired then
             if (t - AP.firedAt) < P.FIRE_LOCK then return end
