@@ -35,7 +35,7 @@ local function disconnectAll(list)
 end
 
 local function track(list, c)
-    if c and type(c.Disconnect) == "function" then
+    if typeof(c) == "Instance" and type(c.Disconnect) == "function" then
         list[#list + 1] = c
     end
     return c
