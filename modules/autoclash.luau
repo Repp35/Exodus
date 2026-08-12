@@ -6,13 +6,8 @@ local GameInfo, Utils, AutoParry
 
 -- tuning
 local C = {
-    DEACT_HARD_GONE_T    = 0.20,
-    DEACT_DEAD_DIST      = 80,
-
     DEACT_CLICK_WINDOW   = 0.100,  -- janela adicional pra evitar flick
     DEACT_PING_FLOOR     = 0.030,
-    DEACT_PING_CAP       = 0.150,
-    DEACT_RADIAL_EMA     = 0.35,
 
     ACT_HARD_CAP         = 22,
     ACT_TIMP_FAST        = 0.085,
@@ -52,8 +47,6 @@ local S = {
 
     dashEvents = {}, dashPanicUntil = 0,
     dashAnti = { untilT = 0 },
-
-    radialSpdEma = 0,
 }
 
 local _localUserId       = -1
@@ -228,7 +221,6 @@ end
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
     S.ballGoneSince      = 0
-    S.radialSpdEma       = 0
     resetTrajState()
     _detRadius        = 0
     _ctxCache.valid   = false
@@ -238,7 +230,6 @@ local function activateClash(t)
     S.clashOn       = true
     S.clashAt       = t
     S.ballGoneSince = 0
-    S.radialSpdEma  = 0
     resetTrajState()
     _detRadius      = 0
     _ctxCache.valid = false
@@ -248,18 +239,21 @@ end
 local function shouldDeactivate(t, ctx)
     if not ctx then return false end
 
-    -- hard gone
-    if ctx.bDist > C.DEACT_DEAD_DIST then
-        if S.ballGoneSince == 0 then S.ballGoneSince = t end
-        if (t - S.ballGoneSince) >= C.DEACT_HARD_GONE_T then return true end
-    else
-        S.ballGoneSince = 0
-    end
-
+    local p = getP()
+    local baseRad = (p and p.DEFLECT_R or 8.5) + parryBonus()
     local spd = ctx.spd or 0
-    if spd < 1 then return false end
 
-    -- velocidade radial com EMA (reusa toMe cacheado no snapshot)
+    local pingOneWay = AutoParry and AutoParry.getPingOneWay
+        and AutoParry.getPingOneWay()
+        or C.DEACT_PING_FLOOR
+
+    -- raio efetivo: parry + quanto a bola anda até o clique chegar
+    local raioEfetivo = math.max(
+        baseRad + spd * (pingOneWay + C.DEACT_CLICK_WINDOW),
+        14
+    )
+
+    -- velocidade radial raw (reusa toMe cacheado no snapshot)
     local radialSpd = 0
     if ctx.toMeMag and ctx.toMeMag > 0.1
         and ctx.hr and ctx.hr.Parent
@@ -270,28 +264,17 @@ local function shouldDeactivate(t, ctx)
             radialSpd = (av.X * ctx.toMeX + av.Y * ctx.toMeY + av.Z * ctx.toMeZ) * inv
         end
     end
-    S.radialSpdEma = S.radialSpdEma * (1 - C.DEACT_RADIAL_EMA) + radialSpd * C.DEACT_RADIAL_EMA
 
-    -- ping e raio efetivo
-    local pingOneWay = AutoParry and AutoParry.getPingOneWay
-        and AutoParry.getPingOneWay()
-        or C.DEACT_PING_FLOOR
-
-    local p = getP()
-    local baseRad = (p and p.DEFLECT_R or 8.5) + parryBonus()
-    local raioEfetivo = math.max(
-        baseRad + spd * (pingOneWay + C.DEACT_CLICK_WINDOW),
-        14
-    )
+    -- fisicamente fora agora → desativa
+    if ctx.bDist > raioEfetivo then return true end
 
     -- posição prevista quando o clique chegar ao servidor
-    local futureDist = ctx.bDist - S.radialSpdEma * pingOneWay
+    local futureDist = ctx.bDist - radialSpd * pingOneWay
 
-    -- bola vai estar dentro da zona → não desativa
-    if futureDist <= raioEfetivo then return false end
+    -- vai estar fora quando o clique chegar → desativa
+    if futureDist > raioEfetivo then return true end
 
-    -- bola vai estar fora → desativa
-    return true
+    return false
 end
 
 local function shouldActivate(t, ctx, targetJustChangedToMe)
@@ -494,7 +477,6 @@ function AutoClash.resetState()
     S.clashOn, S.clashAt = false, 0
     S.lastTarget, S.lastTargetAt = -999, 0
     S.ballGoneSince = 0
-    S.radialSpdEma  = 0
     resetTrajState()
     _detRadius = 0
     table.clear(S.dashEvents)
