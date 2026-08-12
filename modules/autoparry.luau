@@ -53,8 +53,6 @@ local _frameEMA  = 1/60
 local _frameVar  = 0
 local _jitterEMA = 0
 local _dtLast    = 0
-local _dtSamples = {}
-local _dtIdx     = 0
 
 local Sync = {
     Speed    = 0,
@@ -87,6 +85,7 @@ local _pbCache = { ms = -1, ping = -1, jitter = -1, var = -1 }
 
 local _br = nil
 local _brTried = false
+local _wsRef = nil
 local function _ensureBR()
     if _brTried then return _br end
     _brTried = true
@@ -106,8 +105,10 @@ local function _ensureBR()
 end
 
 local function tgtOn()
-    local ok, ws = pcall(function() return game:GetService("Workspace") end)
-    if ok and ws and ws:GetAttribute("GameBallTarget") == _localUserId then
+    if not _wsRef then
+        _wsRef = game:GetService("Workspace")
+    end
+    if _wsRef and _wsRef:GetAttribute("GameBallTarget") == _localUserId then
         return true
     end
     local br = _ensureBR()
@@ -144,27 +145,13 @@ local function sampleFrameDelta(dt)
 
     _frameEMA = _frameEMA * 0.9 + dt * 0.1
 
-    _dtIdx = (_dtIdx % 60) + 1
-    _dtSamples[_dtIdx] = dt
-
     if _dtLast > 0 then
         local devMs = math.abs(dt - _dtLast) * 1000
         _jitterEMA = _jitterEMA * 0.85 + devMs * 0.15
+        local dev = dt - _frameEMA
+        _frameVar = _frameVar * 0.9 + (dev * dev) * 0.1
     end
     _dtLast = dt
-
-    local acc, cnt = 0, 0
-    for i = 1, 60 do
-        local v = _dtSamples[i]
-        if v then
-            acc = acc + (v - _frameEMA) * (v - _frameEMA)
-            cnt = cnt + 1
-        end
-    end
-    if cnt > 0 then
-        local inst = acc / cnt
-        _frameVar = _frameVar * 0.9 + inst * 0.1
-    end
 end
 
 -- ── preBuffer ───────────────────────────────────────────────────────────────
@@ -203,14 +190,14 @@ end
 
 -- ── lead / preBuffer studs ──────────────────────────────────────────────────
 
-local function leadStuds(spd)
+local function leadStuds(spd, p)
     if not spd or spd < 1 then return 0 end
-    return math.min(spd * (pingOneWay() + P.LEAD_REACT_T), P.LEAD_CAP)
+    return math.min(spd * (p + P.LEAD_REACT_T), P.LEAD_CAP)
 end
 
-local function preBufferStuds(spd)
+local function preBufferStuds(spd, pbMs)
     if not spd or spd < 1 then return 0 end
-    return math.min(spd * preBufferMs() / 1000, P.PRE_CAP)
+    return math.min(spd * pbMs / 1000, P.PRE_CAP)
 end
 
 -- ── resilience ──────────────────────────────────────────────────────────────
@@ -267,7 +254,7 @@ local function disconnectAll()
         local c = _activeConns[i]
         _activeConns[i] = nil
         if c and type(c.Disconnect) == "function" then
-            pcall(function() c:Disconnect() end)
+            c:Disconnect()
         end
     end
 end
@@ -311,15 +298,25 @@ local function installFrameSampler()
     local ok, sig = pcall(function() return Utils.getRunService().Heartbeat end)
     if not ok or not sig then return end
     _fbConn = sig:Connect(function(dt) sampleFrameDelta(dt) end)
-    table.insert(_activeConns, _fbConn)
+    _activeConns[#_activeConns + 1] = _fbConn
 end
 
 -- ── hitbox hook ─────────────────────────────────────────────────────────────
 
+local _hitboxHookConn = nil
 local function installHitboxHook()
-    if _hitboxConn then return end
-    local ws = game:GetService("Workspace")
-    _hitboxConn = ws.DescendantAdded:Connect(function(d)
+    if _hitboxHookConn then return end
+    local ok, ws = pcall(function() return game:GetService("Workspace") end)
+    if not ok or not ws then return end
+    local gameFolder = ws:FindFirstChild("Game")
+    if not gameFolder then
+        -- workspace ainda não tem Game; tenta em CharacterAdded depois
+        return
+    end
+    local ballFolder = gameFolder:FindFirstChild("Ball")
+    if not ballFolder then return end
+
+    _hitboxHookConn = ballFolder.DescendantAdded:Connect(function(d)
         if not d:IsA("BasePart") or d.Name ~= "HitboxGrow" then return end
         local t = Utils.now()
         if (t - RES.lastFireBallAt) > P.RES_HITBOX_OWN_WINDOW then return end
@@ -331,7 +328,8 @@ local function installHitboxHook()
         local cap = math.floor((P.RES_CAP - P.RES_BASE) / P.RES_PER_PARRY)
         if RES.stack > cap then RES.stack = cap end
     end)
-    table.insert(_activeConns, _hitboxConn)
+    _activeConns[#_activeConns + 1] = _hitboxHookConn
+    _hitboxConn = _hitboxHookConn
 end
 
 -- ── main loop ───────────────────────────────────────────────────────────────
@@ -346,8 +344,9 @@ local function bindParry(character)
     AP.fired = false
     installFrameSampler()
 
+    local RunService = Utils.getRunService()
     local heartbeatConn
-    heartbeatConn = Utils.getRunService().Heartbeat:Connect(function(dt)
+    heartbeatConn = RunService.Heartbeat:Connect(function(dt)
         if currentBindId ~= _apBind or not (character.Parent and hrp.Parent) then return end
 
         local Config = Utils.getConfig()
@@ -370,24 +369,22 @@ local function bindParry(character)
         if not (ball and ball.Parent) then return end
         if not tgtOn() then return end
 
-        local spd, vel, bp
+        local spd, bp
         local syncFresh = (t - Sync.lastAt) < P.SYNC_FRESH
         if syncFresh and Sync.Speed > 0 then
             spd = Sync.Speed
             bp  = (Sync.RealPos ~= Vector3.zero) and Sync.RealPos or ball.Position
-            local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-            vel = (ok and typeof(av) == "Vector3") and av or nil
         else
             local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
             if not ok or typeof(av) ~= "Vector3" or av.Magnitude < 0.1 then return end
-            vel = av
             spd = av.Magnitude
             bp  = ball.Position
         end
         if spd < P.MIN_SPD then return end
-        if not bp then return end
 
-        local parryRad = P.DEFLECT_R + leadStuds(spd) + preBufferStuds(spd) + resRadiusBonus(t)
+        local p     = pingOneWay()
+        local pbMs  = preBufferMs()
+        local parryRad = P.DEFLECT_R + leadStuds(spd, p) + preBufferStuds(spd, pbMs) + resRadiusBonus(t)
 
         local hx, hy, hz = hrp.Position.X, hrp.Position.Y, hrp.Position.Z
         local dx, dy, dz = hx - bp.X, hy - bp.Y, hz - bp.Z
@@ -429,7 +426,9 @@ function AutoParry.getPingOneWay()       return pingOneWay() end
 function AutoParry.getSync()             return Sync end
 
 function AutoParry.computeParryRadius(spd, t)
-    return P.DEFLECT_R + leadStuds(spd) + preBufferStuds(spd) + resRadiusBonus(t)
+    local p    = pingOneWay()
+    local pbMs = preBufferMs()
+    return P.DEFLECT_R + leadStuds(spd, p) + preBufferStuds(spd, pbMs) + resRadiusBonus(t)
 end
 
 if _G.ExodusModules then _G.ExodusModules.AutoParry = AutoParry end
