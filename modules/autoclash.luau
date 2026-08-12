@@ -1,7 +1,6 @@
 -- [[ auto clash ]]
 
 local AutoClash = {}
-
 local GameInfo, Utils, AutoParry
 
 -- tuning
