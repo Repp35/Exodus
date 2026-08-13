@@ -151,8 +151,12 @@ function Init.start()
     end
 
     local function onBallSync(data)
-        AutoParry.onBallSync(data)
-        AutoClash.onBallSync(data)
+        if AutoParry and type(AutoParry.onBallSync) == "function" then
+            pcall(AutoParry.onBallSync, data)
+        end
+        if AutoClash and type(AutoClash.onBallSync) == "function" then
+            pcall(AutoClash.onBallSync, data)
+        end
     end
 
     Utils.track(GameInfo.installBallWatcher(Utils.track))
