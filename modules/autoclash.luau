@@ -10,27 +10,39 @@ local AutoParry
 
 local C = {
     -- raio de ativação = parryRadius * ACT_RAD_FACTOR
-    ACT_RAD_FACTOR      = 1.30,
+    ACT_RAD_FACTOR      = 1.40,
 
-    -- return detector (global, sem raio mínimo pra detectar)
-    DET_DOT_EMA         = 0.15,   -- EMA pequeno = mais rápido, menos suavização
-    DET_DOT_THRESH      = 0.12,   -- dot mínimo pra considerar "vindo"
-    DET_RETURN_FACTOR   = 2.0,    -- janela = entryTime * factor (adaptativa por spd)
-    DET_TIMEOUT         = 1.20,   -- tempo até resetar pra IDLE se não houver retorno
-    DET_GLOBAL_RANGE    = 40,     -- alcance global de detecção de return
+    -- return detector (mesma lógica da v22, sem EMA = mais rápido)
+    DET_RAD_MIN         = 10,    -- raio mínimo do detector
+    DET_RAD_MAX         = 25,    -- raio máximo do detector
+    DET_RAD_SPD_REF     = 120,   -- spd de referência pro scaling
+    DET_RAD_SLACK       = 1.2,   -- folga do EMA (1.2x do raio)
+    DET_DOT_THRESH      = 0.05,  -- threshold direto (sem EMA = mais sensível)
+    DET_RETURN_FACTOR   = 1.5,   -- janela = entryTime * factor
+    DET_TIMEOUT         = 0.8,   -- reset IDLE se não voltar a tempo
 
-    -- target return (janela adaptativa por velocidade: bola rápida = janela apertada)
-    TARGET_GAP_MIN_LO   = 0.190,  -- gap mínimo @ spd baixa
-    TARGET_GAP_MAX_LO   = 0.260,  -- gap máximo @ spd baixa
-    TARGET_GAP_MIN_HI   = 0.080,  -- gap mínimo @ spd alta
-    TARGET_GAP_MAX_HI   = 0.150,  -- gap máximo @ spd alta
-    TARGET_GAP_SPD_LO   = 60,     -- spd baixa de referência
-    TARGET_GAP_SPD_HI   = 200,    -- spd alta de referência
+    -- target return (eu era → deixei de ser → voltei a ser)
+    -- Janela adaptativa por velocidade: 290ms (spd baixa) → 190ms (spd alta)
+    TARGET_RETURN_MAX_LO = 0.290,
+    TARGET_RETURN_MIN_HI = 0.190,
+    TARGET_RETURN_SPD_LO = 60,
+    TARGET_RETURN_SPD_HI = 200,
 
-    -- deativação por ausência de return (adaptativo por velocidade)
-    DEACT_RETURN_BASE   = 0.40,   -- timeout base em segundos
-    DEACT_RETURN_SPD_REF = 120,   -- velocidade de referência pro factor
-    DEACT_GONE_DIST     = 65,     -- bola sumida = desativa imediato
+    -- deactivate: piso de 14 studs + scaling, sempre > parryRadius
+    -- 14 base + 8 studs a 120 spd (sempre acompanha o raio de parry)
+    DEACT_FLOOR_BASE    = 14,
+    DEACT_FLOOR_SPD_REF = 120,
+    DEACT_FLOOR_K       = 0.0667, -- 8/120 → 8 studs adicionais a 120 spd
+
+    -- deactivate por ausência de return (escalando com velocidade)
+    -- Bola dentro do raio e sem return por X tempo → desativa
+    DEACT_NO_RETURN_MAX_LO = 0.380,  -- 380ms @ spd baixa
+    DEACT_NO_RETURN_MIN_HI = 0.200,  -- 200ms @ spd alta
+    DEACT_NO_RETURN_SPD_LO = 60,
+    DEACT_NO_RETURN_SPD_HI = 200,
+    DEACT_RETURN_RADIUS    = 30,     -- só checa return timeout dentro desse raio
+
+    -- hard fails
     TELEPORT_LOCK       = 0.20,
 }
 
@@ -41,17 +53,18 @@ local S = {
     active   = false,
     activeAt = 0,
 
-    -- return detector
-    detPhase     = "IDLE",  -- IDLE | INSIDE | EXITED
+    -- return detector (máquina de estado igual v22, sem EMA)
+    detPhase     = "IDLE",   -- IDLE | INSIDE | EXITED
     detEnterAt   = 0,
     detEntryTime = 0,
     detExitAt    = 0,
-    detDotEma    = 0,
     detWasInside = false,
 
-    -- target
+    -- target tracking
     lastTarget   = -999,
     lastTargetAt = 0,
+    wasMeTarget  = false,
+    lostMeAt     = 0,
 
     -- deact
     lastReturnAt      = 0,
@@ -78,11 +91,10 @@ local function getActRadius(spd)
     return base * C.ACT_RAD_FACTOR
 end
 
-local function deactReturnTimeout(spd)
-    if spd < 1 then return C.DEACT_RETURN_BASE end
-    -- bola rápida = timeout menor, bola lenta = timeout maior
-    local scale = math.clamp(C.DEACT_RETURN_SPD_REF / spd, 0.4, 2.0)
-    return C.DEACT_RETURN_BASE * scale
+-- raio do detector (igual v22: 10-25 studs baseado em spd)
+local function getDetectorRadius(spd)
+    local k = math.clamp(spd / C.DET_RAD_SPD_REF, 0, 1)
+    return C.DET_RAD_MIN + (C.DET_RAD_MAX - C.DET_RAD_MIN) * k
 end
 
 -- ── lifecycle ────────────────────────────────────────────────────────────────
@@ -92,7 +104,6 @@ local function resetDetector()
     S.detEnterAt   = 0
     S.detEntryTime = 0
     S.detExitAt    = 0
-    S.detDotEma    = 0
     S.detWasInside = false
 end
 
@@ -109,13 +120,13 @@ local function deactivate()
     resetDetector()
 end
 
--- ── return detector (global + armado) ────────────────────────────────────────
+-- ── return detector (v22 logic, sem EMA) ─────────────────────────────────────
 
--- Detecta return globalmente (fora do raio). 
--- Quando detecta, fica "armado" e retorna true quando entra no raio.
+-- Máquina de estado: IDLE → INSIDE → EXITED → INSIDE (signal)
+-- Sem EMA: usa dotRaw direto pra ser mais rápido.
 local function tickReturnDetector(t, hr, ball)
     if not (hr and hr.Parent and ball and ball.Parent) then
-        resetDetector()
+        S.detPhase, S.detWasInside = "IDLE", false
         return false
     end
 
@@ -124,25 +135,21 @@ local function tickReturnDetector(t, hr, ball)
         return false
     end
 
-    local spd  = av.Magnitude
-    local toMe = hr.Position - ball.Position
-    local dist = toMe.Magnitude
-    if dist < 0.001 then return false end
+    local spd    = av.Magnitude
+    local radius = getDetectorRadius(spd)
+    local toMe   = hr.Position - ball.Position
+    local dist   = toMe.Magnitude
+    local dotRaw = av:Dot(toMe.Unit)   -- SEM EMA: dot direto
 
-    local dotRaw = av:Dot(toMe.Unit)   -- positivo = vindo em direção a você
-
-    -- EMA acumula dentro do alcance global; fora zera imediato
-    if dist <= C.DET_GLOBAL_RANGE then
-        S.detDotEma = S.detDotEma * (1 - C.DET_DOT_EMA) + dotRaw * C.DET_DOT_EMA
-    else
-        S.detDotEma = 0
+    -- fora do alcance: reseta detector
+    if dist > radius * C.DET_RAD_SLACK then
+        S.detPhase, S.detWasInside = "IDLE", false
+        return false
     end
 
-    local dotComing = S.detDotEma >  C.DET_DOT_THRESH
-    local dotGoing  = S.detDotEma < -C.DET_DOT_THRESH
-
-    local actRadius = getActRadius(spd)
-    local isInside  = dist <= actRadius
+    local isInside  = dist <= radius
+    local dotComing = dotRaw >  C.DET_DOT_THRESH
+    local dotGoing  = dotRaw < -C.DET_DOT_THRESH
 
     -- reset de timeout na fase EXITED
     if S.detPhase == "EXITED" and (t - S.detExitAt) > C.DET_TIMEOUT then
@@ -152,8 +159,8 @@ local function tickReturnDetector(t, hr, ball)
     local signal = false
 
     if S.detPhase == "IDLE" then
-        -- arm: detecta inversão global (dot passa de negativo pra positivo)
-        if dotComing and not S.detWasInside then
+        -- arm: entrou no raio OU dot já vem positivo (mesmo fora)
+        if (isInside and not S.detWasInside) or (not isInside and dotComing) then
             local entryTime = dist > 0.1 and (dist / spd) or 0.01
             S.detPhase     = "INSIDE"
             S.detEnterAt   = t
@@ -161,8 +168,8 @@ local function tickReturnDetector(t, hr, ball)
         end
 
     elseif S.detPhase == "INSIDE" then
-        -- sai: dot negativo ou se afastando
-        if dotGoing then
+        -- sai: saiu do raio OU dot going (mesmo dentro)
+        if (not isInside and S.detWasInside) or (isInside and dotGoing) then
             S.detPhase  = "EXITED"
             S.detExitAt = t
         end
@@ -171,60 +178,66 @@ local function tickReturnDetector(t, hr, ball)
         local delta  = t - S.detExitAt
         local limiar = S.detEntryTime * C.DET_RETURN_FACTOR
 
-        -- volta: dot positivo novamente dentro da janela
-        if dotComing then
-            if delta <= limiar then
-                -- return confirmado, reinicia o ciclo com dados atuais
-                S.detPhase     = "INSIDE"
-                S.detEnterAt   = t
-                S.detEntryTime = dist > 0.1 and (dist / spd) or 0.01
+        -- volta: entrou de novo OU dot coming, dentro da janela
+        if (isInside and not S.detWasInside) or dotComing then
+            if delta <= limiar and dotComing then
+                signal = true           -- return confirmado
+                S.lastReturnAt = t
             end
+            -- re-arm pra próximo ciclo
+            local entryTime = dist > 0.1 and (dist / spd) or 0.01
+            S.detPhase     = "INSIDE"
+            S.detEnterAt   = t
+            S.detEntryTime = entryTime
         end
     end
 
     S.detWasInside = isInside
-
-    -- ativa quando return está armado E bola entrou no raio
-    if S.detPhase == "INSIDE" and isInside and dotComing then
-        signal = true
-        S.lastReturnAt = t
-    end
-
     return signal
 end
 
 -- ── activation ───────────────────────────────────────────────────────────────
 
--- Qualquer gate só ativa se for o target E estiver dentro do raio.
--- Retorna true no PRIMEIRO tick que qualquer gate confirmar clash.
 local function shouldActivate(t, hr, ball)
     if not (isTargeted() and hr and hr.Parent and ball and ball.Parent) then
         return false
     end
 
-    -- return detector armado + bola dentro do raio
+    -- return detector armado
     if tickReturnDetector(t, hr, ball) then return true end
 
     return false
 end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
+-- O gate de desativação é o timeout de "no return".
+-- O piso (14 + 8*(spd/120)) é só a distância mínima que a bola precisa estar
+-- pra esse gate ser considerado. NÃO é um trigger imediato.
+
+local function getDeactFloor(spd)
+    local k = math.clamp(spd / C.DEACT_FLOOR_SPD_REF, 0, 2.5)
+    return C.DEACT_FLOOR_BASE + 8 * k
+end
+
+local function noReturnTimeout(spd)
+    local u = math.clamp((spd - C.DEACT_NO_RETURN_SPD_LO) / (C.DEACT_NO_RETURN_SPD_HI - C.DEACT_NO_RETURN_SPD_LO), 0, 1)
+    return C.DEACT_NO_RETURN_MAX_LO + (C.DEACT_NO_RETURN_MIN_HI - C.DEACT_NO_RETURN_MAX_LO) * u
+end
 
 local function shouldDeactivate(t, hr, ball)
-    -- hard: teleporte
     if t < S.teleportLockUntil then return true end
-
-    -- hard: bola sumiu ou não existe
     if not (ball and ball.Parent and hr and hr.Parent) then return true end
 
     local dist = (hr.Position - ball.Position).Magnitude
-    if dist > C.DEACT_GONE_DIST then return true end
-
-    -- soft: sem return por tempo adaptativo à velocidade da bola
     local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
     local spd = (ok and typeof(av) == "Vector3") and av.Magnitude or 0
-    local timeout = deactReturnTimeout(spd)
+    local floor = getDeactFloor(spd)
 
+    -- dentro do piso: não desativa (bola ainda na zona ativa)
+    if dist <= floor then return false end
+
+    -- além do piso: gate é o timeout de no-return
+    local timeout = noReturnTimeout(spd)
     if (t - S.lastReturnAt) > timeout then return true end
 
     return false
@@ -246,7 +259,7 @@ local function evaluate(t, hr, ball, config)
 
     S.enabled = true
 
-    -- se hard-fail (sem hr/ball ou teleporte), desativa e sai sem chance de re-armar
+    -- hard fails
     if not (hr and hr.Parent and ball and ball.Parent) then
         deactivate()
         return
@@ -256,61 +269,67 @@ local function evaluate(t, hr, ball, config)
         return
     end
 
-    -- uma vez ativo: detector manda, só desativa por return timeout
+    -- uma vez ativo: mantém o detector tickando, mas não desativa fácil
     if S.active then
-        -- ticka o detector: se houver return válido, atualiza lastReturnAt
         tickReturnDetector(t, hr, ball)
         if shouldDeactivate(t, hr, ball) then deactivate() end
         return
     end
 
-    -- inativo: tenta ativar com qualquer gate disponível
+    -- inativo: tenta ativar via detector
     if shouldActivate(t, hr, ball) then activate(t) end
 end
 
 -- ── callbacks ────────────────────────────────────────────────────────────────
 
--- Janela de target return adaptativa à velocidade: mais rápido = mais apertado
-local function targetGapWindow(spd)
-    local u = math.clamp((spd - C.TARGET_GAP_SPD_LO) / (C.TARGET_GAP_SPD_HI - C.TARGET_GAP_SPD_LO), 0, 1)
-    local gmin = C.TARGET_GAP_MIN_LO + (C.TARGET_GAP_MIN_HI - C.TARGET_GAP_MIN_LO) * u
-    local gmax = C.TARGET_GAP_MAX_LO + (C.TARGET_GAP_MAX_HI - C.TARGET_GAP_MAX_LO) * u
-    return gmin, gmax
+-- Janela do target return adaptativa à velocidade da bola
+local function targetReturnWindow(spd)
+    local u = math.clamp((spd - C.TARGET_RETURN_SPD_LO) / (C.TARGET_RETURN_SPD_HI - C.TARGET_RETURN_SPD_LO), 0, 1)
+    return C.TARGET_RETURN_MAX_LO + (C.TARGET_RETURN_MIN_HI - C.TARGET_RETURN_MAX_LO) * u
 end
 
+-- Target return: se eu era target → deixei de ser → voltei a ser dentro da janela
 local function onTarget(newTarget, t)
     if type(newTarget) ~= "number" then return end
 
-    local prevTarget   = S.lastTarget
-    local prevTargetAt = S.lastTargetAt
+    local prevTarget = S.lastTarget
+    local lp         = getLocalPlayer()
+    local myId       = lp and lp.UserId or -1
+
     S.lastTarget   = newTarget
     S.lastTargetAt = t
 
     local ap = AutoParry.getState and AutoParry.getState() or nil
-    if ap then ap.armed = (newTarget == Utils.getLocalPlayer().UserId) end
+    if ap then ap.armed = (newTarget == myId) end
 
-    -- target return: voltou pra mim dentro da janela
-    local cameBackToMe = newTarget == Utils.getLocalPlayer().UserId
-        and prevTarget ~= Utils.getLocalPlayer().UserId
-        and prevTarget ~= -999
+    local isMe  = (newTarget == myId)
+    local wasMe = (prevTarget == myId)
 
-    if not cameBackToMe then return end
-
-    -- janela adaptativa por velocidade da bola
-    local spd = 0
-    local ball = getBall()
-    if ball and ball.Parent then
-        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-        if ok and typeof(av) == "Vector3" then spd = av.Magnitude end
+    -- rastrear quando deixei de ser target
+    if wasMe and not isMe then
+        S.lostMeAt    = t
+        S.wasMeTarget = true
     end
-    local gapMin, gapMax = targetGapWindow(spd)
 
-    local gap = t - (prevTargetAt or 0)
-    if gap < gapMin or gap > gapMax then return end
+    -- target return: voltei a ser target depois de ter perdido
+    if isMe and not wasMe and S.wasMeTarget then
+        -- janela adaptativa por velocidade da bola
+        local spd = 0
+        local ball = getBall()
+        if ball and ball.Parent then
+            local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+            if ok and typeof(av) == "Vector3" then spd = av.Magnitude end
+        end
+        local win = targetReturnWindow(spd)
 
-    -- ativa direto e registra return
-    if not S.active then activate(t) end
-    S.lastReturnAt = t
+        local gap = t - (S.lostMeAt or 0)
+        if gap <= win then
+            if not S.active then activate(t) end
+            S.lastReturnAt = t
+        end
+        S.wasMeTarget = false
+        S.lostMeAt    = 0
+    end
 end
 
 local function onTeleport()
@@ -352,6 +371,7 @@ function AutoClash.resetState()
     S.enabled = false
     S.active, S.activeAt = false, 0
     S.lastTarget, S.lastTargetAt = -999, 0
+    S.wasMeTarget, S.lostMeAt = false, 0
     S.lastReturnAt, S.teleportLockUntil = 0, 0
     resetDetector()
 end
