@@ -20,8 +20,13 @@ local C = {
     TARGET_GAP_MAX       = 0.45,   -- acima disso não é return
 
     -- deativação
-    DEACT_OUT_FRAMES     = 2,
-    DEACT_RAD_MIN        = 14,
+    DEACT_RAD_MIN        = 18,   -- raio mínimo pra manter clash ativo
+    DEACT_RAD_MAX        = 30,   -- teto do raio de deact
+    DEACT_TIMP_MAX       = 0.30, -- tImp máximo pra manter (escala com spd)
+    DEACT_APPROACH_DOT   = 0.20, -- dot mínimo pra considerar bola vindo
+    DEACT_GONE_DIST      = 60,   -- distância que conta como "bola sumiu"
+    DEACT_GONE_T         = 0.20, -- tempo até desativar após bola sumir
+    DEACT_MAX_HOLD       = 1.40, -- hard cap absoluto
 
     -- sync gate (panic)
     ACT_HARD_CAP         = 22,
@@ -31,7 +36,7 @@ local C = {
 local S = {
     lastTarget   = -999, lastTargetAt = 0,
     clashOn      = false, clashAt = 0,
-    ballGoneSince = 0, outOfRangeFrames = 0,
+    ballGoneSince = 0,
 
     -- trajectory state
     dotPrev      = nil,   -- dot do frame anterior
@@ -198,23 +203,54 @@ end
 
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
-    S.ballGoneSince, S.outOfRangeFrames = 0, 0
+    S.ballGoneSince = 0
     resetTraj()
     _ctxCache.valid = false
 end
 
 local function activateClash(t)
     S.clashOn, S.clashAt = true, t
-    S.ballGoneSince, S.outOfRangeFrames = 0, 0
+    S.ballGoneSince = 0
     resetTraj()
     _ctxCache.valid = false
 end
 
+local function deactTimpMax(spd)
+    if spd < 1 then return C.DEACT_TIMP_MAX end
+    return math.clamp(C.DEACT_TIMP_MAX * (60 / spd), 0.08, 0.40)
+end
+
 local function shouldDeactivate(t, ctx)
     if not ctx then return false end
-    local isOut = ctx.bDist > getDeactRadius()
-    S.outOfRangeFrames = isOut and (S.outOfRangeFrames + 1) or 0
-    return S.outOfRangeFrames >= C.DEACT_OUT_FRAMES
+
+    -- hard cap absoluto
+    if (t - S.clashAt) > C.DEACT_MAX_HOLD then return true end
+
+    -- bola sumiu por tempo suficiente
+    if ctx.bDist > C.DEACT_GONE_DIST then
+        if S.ballGoneSince == 0 then S.ballGoneSince = t end
+        if (t - S.ballGoneSince) >= C.DEACT_GONE_T then return true end
+        return false  -- ainda aguardando o timer
+    else
+        S.ballGoneSince = 0
+    end
+
+    local spd = ctx.spd or 0
+
+    -- raio de deactivação: parry radius com piso/teto fixos
+    local deactRad = math.clamp(getParryRadius(), C.DEACT_RAD_MIN, C.DEACT_RAD_MAX)
+    if ctx.bDist > deactRad then return true end
+
+    -- tImp muito alto = bola longe ou lenta demais pra ser ameaça
+    if ctx.tImp and ctx.tImp > deactTimpMax(spd) then return true end
+
+    -- bola se afastando E fora de um raio mínimo
+    if ctx.dot < C.DEACT_APPROACH_DOT and ctx.bDist > 15 then return true end
+
+    -- bola parada e longe
+    if spd < 1 and ctx.bDist > 20 then return true end
+
+    return false
 end
 
 local function shouldActivate(t, ctx, targetJustChangedToMe)
@@ -312,7 +348,7 @@ end
 function AutoClash.resetState()
     S.clashOn, S.clashAt = false, 0
     S.lastTarget, S.lastTargetAt = -999, 0
-    S.ballGoneSince, S.outOfRangeFrames = 0, 0
+    S.ballGoneSince = 0
     resetTraj()
     _ctxCache.valid = false
 end
