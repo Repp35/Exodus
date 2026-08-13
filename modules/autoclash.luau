@@ -19,13 +19,13 @@ local C = {
     DET_TIMEOUT         = 1.20,   -- tempo até resetar pra IDLE se não houver retorno
     DET_GLOBAL_RANGE    = 40,     -- alcance global de detecção de return
 
-    -- target return
-    TARGET_GAP_MIN      = 0.02,   -- filtra sync duplicado
-    TARGET_GAP_MAX      = 0.28,   -- janela máxima de return
-
-    -- invisible gate
-    INV_DOT_MIN         = 0.30,   -- dot mínimo da bola em direção a você
-    INV_SPD_MIN         = 50,     -- velocidade mínima da bola
+    -- target return (janela adaptativa por velocidade: bola rápida = janela apertada)
+    TARGET_GAP_MIN_LO   = 0.190,  -- gap mínimo @ spd baixa
+    TARGET_GAP_MAX_LO   = 0.260,  -- gap máximo @ spd baixa
+    TARGET_GAP_MIN_HI   = 0.080,  -- gap mínimo @ spd alta
+    TARGET_GAP_MAX_HI   = 0.150,  -- gap máximo @ spd alta
+    TARGET_GAP_SPD_LO   = 60,     -- spd baixa de referência
+    TARGET_GAP_SPD_HI   = 200,    -- spd alta de referência
 
     -- deativação por ausência de return (adaptativo por velocidade)
     DEACT_RETURN_BASE   = 0.40,   -- timeout base em segundos
@@ -193,39 +193,17 @@ local function tickReturnDetector(t, hr, ball)
     return signal
 end
 
--- ── invisible gate ───────────────────────────────────────────────────────────
-
-local function invisibleGate(hr, ball, spd)
-    if not isTargeted() then return false end
-    if spd < C.INV_SPD_MIN then return false end
-
-    local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-    if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then return false end
-
-    local toMe = hr.Position - ball.Position
-    if toMe.Magnitude < 0.1 then return true end
-
-    local dot = av:Dot(toMe.Unit) / av.Magnitude
-    return dot >= C.INV_DOT_MIN
-end
-
 -- ── activation ───────────────────────────────────────────────────────────────
 
+-- Qualquer gate só ativa se for o target E estiver dentro do raio.
+-- Retorna true no PRIMEIRO tick que qualquer gate confirmar clash.
 local function shouldActivate(t, hr, ball)
-    -- return detector: não precisa de targeted (detector já filtra por raio)
-    if tickReturnDetector(t, hr, ball) then
-        if isTargeted() then return true end
+    if not (isTargeted() and hr and hr.Parent and ball and ball.Parent) then
+        return false
     end
 
-    if not isTargeted() then return false end
-
-    -- invisible gate: targeted + bola rápida vindo em direção a você
-    if ball and ball.Parent then
-        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
-        if ok and typeof(av) == "Vector3" then
-            if invisibleGate(hr, ball, av.Magnitude) then return true end
-        end
-    end
+    -- return detector armado + bola dentro do raio
+    if tickReturnDetector(t, hr, ball) then return true end
 
     return false
 end
@@ -243,9 +221,6 @@ local function shouldDeactivate(t, hr, ball)
     if dist > C.DEACT_GONE_DIST then return true end
 
     -- soft: sem return por tempo adaptativo à velocidade da bola
-    -- continua o detector durante o clash pra atualizar lastReturnAt
-    tickReturnDetector(t, hr, ball)
-
     local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
     local spd = (ok and typeof(av) == "Vector3") and av.Magnitude or 0
     local timeout = deactReturnTimeout(spd)
@@ -271,17 +246,37 @@ local function evaluate(t, hr, ball, config)
 
     S.enabled = true
 
+    -- se hard-fail (sem hr/ball ou teleporte), desativa e sai sem chance de re-armar
+    if not (hr and hr.Parent and ball and ball.Parent) then
+        deactivate()
+        return
+    end
+    if t < S.teleportLockUntil then
+        deactivate()
+        return
+    end
+
+    -- uma vez ativo: detector manda, só desativa por return timeout
     if S.active then
+        -- ticka o detector: se houver return válido, atualiza lastReturnAt
+        tickReturnDetector(t, hr, ball)
         if shouldDeactivate(t, hr, ball) then deactivate() end
         return
     end
 
-    if hr and hr.Parent then
-        if shouldActivate(t, hr, ball) then activate(t) end
-    end
+    -- inativo: tenta ativar com qualquer gate disponível
+    if shouldActivate(t, hr, ball) then activate(t) end
 end
 
 -- ── callbacks ────────────────────────────────────────────────────────────────
+
+-- Janela de target return adaptativa à velocidade: mais rápido = mais apertado
+local function targetGapWindow(spd)
+    local u = math.clamp((spd - C.TARGET_GAP_SPD_LO) / (C.TARGET_GAP_SPD_HI - C.TARGET_GAP_SPD_LO), 0, 1)
+    local gmin = C.TARGET_GAP_MIN_LO + (C.TARGET_GAP_MIN_HI - C.TARGET_GAP_MIN_LO) * u
+    local gmax = C.TARGET_GAP_MAX_LO + (C.TARGET_GAP_MAX_HI - C.TARGET_GAP_MAX_LO) * u
+    return gmin, gmax
+end
 
 local function onTarget(newTarget, t)
     if type(newTarget) ~= "number" then return end
@@ -301,8 +296,17 @@ local function onTarget(newTarget, t)
 
     if not cameBackToMe then return end
 
+    -- janela adaptativa por velocidade da bola
+    local spd = 0
+    local ball = getBall()
+    if ball and ball.Parent then
+        local ok, av = pcall(function() return ball.AssemblyLinearVelocity end)
+        if ok and typeof(av) == "Vector3" then spd = av.Magnitude end
+    end
+    local gapMin, gapMax = targetGapWindow(spd)
+
     local gap = t - (prevTargetAt or 0)
-    if gap < C.TARGET_GAP_MIN or gap > C.TARGET_GAP_MAX then return end
+    if gap < gapMin or gap > gapMax then return end
 
     -- ativa direto e registra return
     if not S.active then activate(t) end
