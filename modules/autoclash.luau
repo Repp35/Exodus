@@ -26,9 +26,6 @@ local C = {
     DEACT_HOLD_MIN       = 0.08,
     DEACT_SOFT_FRAMES    = 2,
     TELEPORT_LOCK        = 0.20,
-
-    ACT_HARD_CAP         = 22,
-    ACT_TIMP_FAST        = 0.085,
 }
 
 local S = {
@@ -263,26 +260,14 @@ local function shouldDeactivate(t, ctx)
     end
 end
 
-local function shouldActivate(t, ctx, targetJustChangedToMe)
-    if S.detSignal and (ctx and ctx.targeted or isTargeted()) then return true end
-
-    if not (ctx and (ctx.targeted or isTargeted())) then return false end
-    if not (ctx and ctx.bDist) then return false end
-
-    if targetJustChangedToMe then
-        if ctx.bDist <= C.ACT_HARD_CAP
-            and ctx.tImp > 0
-            and ctx.tImp <= C.ACT_TIMP_FAST then
-            return true
-        end
-    end
-
-    return false
+local function shouldActivate(t, ctx)
+    if not S.detSignal then return false end
+    return (ctx and ctx.targeted) or isTargeted()
 end
 
 -- ── evaluate ─────────────────────────────────────────────────────────────────
 
-local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
+local function evaluateClash(t, hr, ball, config)
     if not config or config.AutoClash == false or _G.PhantomManual then
         if S.clashOn then clearClash() end; return
     end
@@ -298,10 +283,10 @@ local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
         return
     end
 
-    if shouldActivate(t, ctx, targetJustChangedToMe) then activateClash(t) end
+    if shouldActivate(t, ctx) then activateClash(t) end
 end
 
--- ── target handler ───────────────────────────────────────────────────────────
+-- ── target handler (returnTarget: detector-irmão da trajectory) ─────────────
 
 local function onTarget(newTarget, t)
     if type(newTarget) ~= "number" then return end
@@ -320,7 +305,7 @@ local function onTarget(newTarget, t)
     local gap = t - (prevTargetAt or 0)
     if gap < C.TARGET_GAP_MIN or gap > C.TARGET_GAP_MAX then return end
 
-    activateClash(t)
+    S.detSignal = true
 end
 
 -- ── public ───────────────────────────────────────────────────────────────────
@@ -333,8 +318,8 @@ function AutoClash.setup(deps)
     Utils.setOnTeleport(onTeleport)
 end
 
-function AutoClash.evaluate(t, hr, ball, config, targetJustChangedToMe)
-    evaluateClash(t, hr, ball, config, targetJustChangedToMe)
+function AutoClash.evaluate(t, hr, ball, config)
+    evaluateClash(t, hr, ball, config)
 end
 function AutoClash.updateDashTrack(t)     end
 function AutoClash.installAntiDashHooks() end
