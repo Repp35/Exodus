@@ -412,7 +412,8 @@ local function bindParry(character)
         local ok2, av2 = pcall(function() return ball.AssemblyLinearVelocity end)
         local vel = (ok2 and typeof(av2) == "Vector3") and av2 or nil
         if not (vel and vel.Magnitude > 0.5) then return end
-        local toMe = hrp.Position - bp
+        local ballPos = ball.Position
+        local toMe = hrp.Position - ballPos
         local distance = toMe.Magnitude
         if distance < 1e-4 then return end
         local currentSpd = vel.Magnitude
