@@ -37,22 +37,11 @@ local P = {
     RES_HITBOX_OWN_WINDOW = 0.5,
     RES_HITBOX_PROX     = 12,
     RES_HITBOX_GAP      = 0.4,
-
-    -- hit confirmation (copiado da versao grande)
-    TRIGGER_TTH      = 0.18,
-    RAD_WIN          = 0.20,
-    RAD_OFF          = 0,
-    RAD_PRE          = 0,
-    RAD_MIN          = 9,
-    RAD_MAX          = 90,
 }
 
 -- ── state ───────────────────────────────────────────────────────────────────
 
-local AP = {
-    fired = false,
-    firedAt = 0,
-}
+local AP = { fired = false, firedAt = 0 }
 
 local _lastTargetSeen = -999
 local _localUserId    = -1
@@ -103,7 +92,7 @@ local function _ensureBR()
     pcall(function()
         local ts = game:GetService("ReplicatedStorage"):FindFirstChild("TS")
         if not ts then return end
-        local brMod = ts.BallReplicator
+        local brMod = ts:FindFirstChild("BallReplicator")
             and ts.BallReplicator:FindFirstChild("BallReplicator")
         if brMod then
             local ok, mod = pcall(require, brMod)
@@ -320,7 +309,10 @@ local function installHitboxHook()
     local ok, ws = pcall(function() return game:GetService("Workspace") end)
     if not ok or not ws then return end
     local gameFolder = ws:FindFirstChild("Game")
-    if not gameFolder then return end
+    if not gameFolder then
+        -- workspace ainda não tem Game; tenta em CharacterAdded depois
+        return
+    end
     local ballFolder = gameFolder:FindFirstChild("Ball")
     if not ballFolder then return end
 
@@ -349,7 +341,7 @@ local function bindParry(character)
     if not (character and character.Parent) then return end
     local hrp = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 1)
     if currentBindId ~= _apBind or not (hrp and hrp.Parent) then return end
-    AP.fired, AP.firedAt = false, 0
+    AP.fired = false
     installFrameSampler()
 
     local RunService = Utils.getRunService()
@@ -398,22 +390,12 @@ local function bindParry(character)
         local dx, dy, dz = hx - bp.X, hy - bp.Y, hz - bp.Z
         if dx*dx + dy*dy + dz*dz > parryRad * parryRad then return end
 
+        if AP.fired then
+            if (t - AP.firedAt) >= P.FIRE_TIMEOUT then AP.fired = false end
+        end
         if AP.fired then return end
-
-        if AP.firedAt > Sync.lastAt then return end
         if (t - AP.firedAt) < P.FIRE_LOCK then return end
-
-        -- hit confirmation: so clica se a bola esta realmente fechando
-        local toMe = hrp.Position - bp
-        local ok2, av2 = pcall(function() return ball.AssemblyLinearVelocity end)
-        local vel = (ok2 and typeof(av2) == "Vector3") and av2 or nil
-        if not (vel and vel.Magnitude > 0.5) then return end
-        local currentSpd = vel.Magnitude
-        local rad = math.clamp(currentSpd * P.RAD_WIN + P.RAD_OFF, P.RAD_MIN, P.RAD_MAX) + P.RAD_PRE
-        local distance = toMe.Magnitude
-        if distance > rad then return end
-        local timeToHit = currentSpd > 1 and (distance / currentSpd) or math.huge
-        if timeToHit >= P.TRIGGER_TTH then return end
+        if AP.firedAt > Sync.lastAt then return end
 
         AP.fired, AP.firedAt = true, t
         if not sendParry() then AP.fired = false end
