@@ -4,46 +4,44 @@ local AutoClash = {}
 local GameInfo, Utils, AutoParry
 
 local C = {
-    -- raio de detecção (parry radius + piso)
     DET_RAD_FLOOR        = 18,
     DET_RAD_CEIL         = 45,
-    DET_RAD_SPD_K        = 0.08,   -- cresce devagar com velocidade
+    DET_RAD_SPD_K        = 0.08,
 
-    -- trajectory: detecção de return por dot
-    TRAJ_DOT_THRESH      = 0.12,   -- dot mínimo pra confirmar inversão (2 frames)
-    TRAJ_WIN_STUDS       = 40,     -- janela base em studs (dividido pela spd = janela em tempo)
-    TRAJ_WIN_FACTOR      = 1.5,    -- multiplicador base da janela (afrouxa em spd baixa)
-    TRAJ_WIN_SPD_REF     = 120,    -- velocidade de referência pro factor
+    TRAJ_DOT_THRESH      = 0.12,
+    TRAJ_WIN_STUDS       = 40,
+    TRAJ_WIN_FACTOR      = 1.5,
+    TRAJ_WIN_SPD_REF     = 120,
 
-    -- target return: janela temporal
-    TARGET_GAP_MIN       = 0.02,   -- filtra sync duplicado
-    TARGET_GAP_MAX       = 0.45,   -- acima disso não é return
+    TARGET_GAP_MIN       = 0.02,
+    TARGET_GAP_MAX       = 0.28,
 
-    -- deativação
-    DEACT_RAD_MIN        = 18,   -- raio mínimo pra manter clash ativo
-    DEACT_RAD_MAX        = 30,   -- teto do raio de deact
-    DEACT_TIMP_MAX       = 0.30, -- tImp máximo pra manter (escala com spd)
-    DEACT_APPROACH_DOT   = 0.20, -- dot mínimo pra considerar bola vindo
-    DEACT_GONE_DIST      = 60,   -- distância que conta como "bola sumiu"
-    DEACT_GONE_T         = 0.20, -- tempo até desativar após bola sumir
-    DEACT_MAX_HOLD       = 1.40, -- hard cap absoluto
+    DEACT_RAD_MIN        = 18,
+    DEACT_RAD_MAX        = 30,
+    DEACT_TIMP_MAX       = 0.30,
+    DEACT_APPROACH_DOT   = 0.25,
+    DEACT_GONE_DIST      = 60,
+    DEACT_GONE_BDIST     = 15,
+    DEACT_STILL_BDIST    = 20,
+    DEACT_HOLD_MIN       = 0.08,
+    DEACT_SOFT_FRAMES    = 2,
+    TELEPORT_LOCK        = 0.20,
 
-    -- sync gate (panic)
     ACT_HARD_CAP         = 22,
     ACT_TIMP_FAST        = 0.085,
 }
 
 local S = {
-    lastTarget   = -999, lastTargetAt = 0,
-    clashOn      = false, clashAt = 0,
-    ballGoneSince = 0,
+    lastTarget       = -999, lastTargetAt = 0,
+    clashOn          = false, clashAt = 0,
+    teleportLockUntil = 0,
 
-    -- trajectory state
-    dotPrev      = nil,   -- dot do frame anterior
-    dotConfirm   = 0,     -- frames consecutivos com dot positivo após inversão
-    returnAt     = 0,     -- quando detectou o return
-    returnSpd    = 0,     -- velocidade no momento do return
+    dotPrev      = nil,
+    dotConfirm   = 0,
+    returnAt     = 0,
+    returnSpd    = 0,
     detSignal    = false,
+    deactSoftHit = 0,
 }
 
 local _localUserId = -1
@@ -99,7 +97,7 @@ local function clashSnapshot()
         spd = av.Magnitude
         local toMe = hr.Position - ball.Position
         local dist = toMe.Magnitude
-        if dist > 0.1 then dot = av:Dot(toMe.Unit) / spd end  -- cosToward normalizado
+        if dist > 0.1 then dot = av:Dot(toMe.Unit) / spd end
     end
 
     local tImp, s2 = math.huge, spd
@@ -135,8 +133,6 @@ local function resetTraj()
 end
 
 local function returnWindow(spd)
-    -- janela em segundos: base de studs / spd, escalada pelo factor
-    -- em spd alta o factor aperta (menos tempo), em spd baixa afrouxa
     if spd < 1 then return 0.8 end
     local scale = math.clamp(C.TRAJ_WIN_SPD_REF / spd, 0.4, 2.0)
     return (C.TRAJ_WIN_STUDS / spd) * C.TRAJ_WIN_FACTOR * scale
@@ -153,7 +149,6 @@ local function tickTrajectory(t, hr, ball, ctx)
     local spd = ctx.valid and ctx.spd or 0
     local dist = ctx.valid and ctx.bDist or 0
 
-    -- primeiro frame: só inicializa
     if S.dotPrev == nil then
         S.dotPrev = dot; return
     end
@@ -161,10 +156,7 @@ local function tickTrajectory(t, hr, ball, ctx)
     local prev = S.dotPrev
     S.dotPrev  = dot
 
-    -- detecta inversão: bola ia embora (dot < 0) e agora vem (dot > thresh)
-    -- exige 2 frames consecutivos pra confirmar (filtra ruído de 1 frame)
     if prev < -C.TRAJ_DOT_THRESH and dot > C.TRAJ_DOT_THRESH then
-        -- inversão detectada neste frame — começa contagem de confirmação
         S.dotConfirm = 1
         S.returnAt   = t
         S.returnSpd  = spd
@@ -173,27 +165,22 @@ local function tickTrajectory(t, hr, ball, ctx)
 
     if S.dotConfirm == 1 then
         if dot > C.TRAJ_DOT_THRESH then
-            -- segundo frame confirmado: return real
             S.dotConfirm = 2
         else
-            -- não confirmou: cancela
             S.dotConfirm = 0
             S.returnAt   = 0
         end
     end
 
-    -- return confirmado: verifica se ainda está na janela e no raio
     if S.dotConfirm >= 2 and S.returnAt > 0 then
         local elapsed = t - S.returnAt
         local window  = returnWindow(S.returnSpd)
         local radius  = getDetRadius(spd)
 
         if elapsed > window then
-            -- janela expirou: descarta return
             S.dotConfirm = 0
             S.returnAt   = 0
         elseif dist <= radius and dot > C.TRAJ_DOT_THRESH then
-            -- dentro do raio, ainda vindo: ativa
             S.detSignal = true
         end
     end
@@ -203,16 +190,22 @@ end
 
 local function clearClash()
     S.clashOn, S.clashAt = false, 0
-    S.ballGoneSince = 0
+    S.deactSoftHit = 0
     resetTraj()
     _ctxCache.valid = false
 end
 
 local function activateClash(t)
     S.clashOn, S.clashAt = true, t
-    S.ballGoneSince = 0
+    S.deactSoftHit = 0
     resetTraj()
     _ctxCache.valid = false
+end
+
+local function onTeleport()
+    local t = Utils.now()
+    S.teleportLockUntil = t + C.TELEPORT_LOCK
+    clearClash()
 end
 
 local function deactTimpMax(spd)
@@ -220,48 +213,62 @@ local function deactTimpMax(spd)
     return math.clamp(C.DEACT_TIMP_MAX * (60 / spd), 0.08, 0.40)
 end
 
+local function isBallApproaching(ctx)
+    if not ctx then return true end
+    if (ctx.spd or 0) < 1 then return true end
+    if not ctx.dot then return true end
+    return ctx.dot > C.DEACT_APPROACH_DOT
+end
+
 local function shouldDeactivate(t, ctx)
     if not ctx then return false end
 
-    -- hard cap absoluto
-    if (t - S.clashAt) > C.DEACT_MAX_HOLD then return true end
+    local lp = Utils.getLocalPlayer()
+    local myChar = lp and lp.Character
+    if not (myChar and myChar.Parent) then return true end
+    local myHum = myChar:FindFirstChildOfClass("Humanoid")
+    if not (myHum and myHum.Parent and myHum.Health > 0) then return true end
 
-    -- bola sumiu por tempo suficiente
-    if ctx.bDist > C.DEACT_GONE_DIST then
-        if S.ballGoneSince == 0 then S.ballGoneSince = t end
-        if (t - S.ballGoneSince) >= C.DEACT_GONE_T then return true end
-        return false  -- ainda aguardando o timer
-    else
-        S.ballGoneSince = 0
-    end
+    if t < S.teleportLockUntil then return true end
+
+    if ctx.bDist > C.DEACT_GONE_DIST then return true end
 
     local spd = ctx.spd or 0
-
-    -- raio de deactivação: parry radius com piso/teto fixos
     local deactRad = math.clamp(getParryRadius(), C.DEACT_RAD_MIN, C.DEACT_RAD_MAX)
-    if ctx.bDist > deactRad then return true end
 
-    -- tImp muito alto = bola longe ou lenta demais pra ser ameaça
-    if ctx.tImp and ctx.tImp > deactTimpMax(spd) then return true end
+    if (t - S.clashAt) < C.DEACT_HOLD_MIN then
+        S.deactSoftHit = 0
+        return false
+    end
 
-    -- bola se afastando E fora de um raio mínimo
-    if ctx.dot < C.DEACT_APPROACH_DOT and ctx.bDist > 15 then return true end
+    local softHit = false
 
-    -- bola parada e longe
-    if spd < 1 and ctx.bDist > 20 then return true end
+    if ctx.bDist > deactRad then
+        if (t - S.clashAt) >= C.DEACT_HOLD_MIN then return true end
+    end
 
-    return false
+    if ctx.tImp and ctx.tImp > deactTimpMax(spd) then softHit = true end
+
+    if not isBallApproaching(ctx) and ctx.bDist > C.DEACT_GONE_BDIST then softHit = true end
+
+    if spd < 1 and ctx.bDist > C.DEACT_STILL_BDIST then softHit = true end
+
+    if softHit then
+        S.deactSoftHit = S.deactSoftHit + 1
+        if S.deactSoftHit < C.DEACT_SOFT_FRAMES then return false end
+        return true
+    else
+        S.deactSoftHit = 0
+        return false
+    end
 end
 
 local function shouldActivate(t, ctx, targetJustChangedToMe)
-    -- gate 1: trajectory confirmou return
-    if S.detSignal then return true end
+    if S.detSignal and (ctx and ctx.targeted or isTargeted()) then return true end
 
-    -- gates abaixo precisam de targeted
     if not (ctx and (ctx.targeted or isTargeted())) then return false end
     if not (ctx and ctx.bDist) then return false end
 
-    -- gate 2: sync panic (target mudou + bola perto + impacto iminente)
     if targetJustChangedToMe then
         if ctx.bDist <= C.ACT_HARD_CAP
             and ctx.tImp > 0
@@ -305,7 +312,6 @@ local function onTarget(newTarget, t)
     if ap then ap.armed = (newTarget == _localUserId) end
     _ctxCache.valid = false
 
-    -- target return: voltou pra mim dentro da janela temporal
     local cameBackToMe = (newTarget == _localUserId)
         and (prevTarget ~= _localUserId)
         and (prevTarget ~= -999)
@@ -314,7 +320,6 @@ local function onTarget(newTarget, t)
     local gap = t - (prevTargetAt or 0)
     if gap < C.TARGET_GAP_MIN or gap > C.TARGET_GAP_MAX then return end
 
-    -- ativa direto, sem checks de física
     activateClash(t)
 end
 
@@ -325,7 +330,7 @@ function AutoClash.setup(deps)
     _localUserId = Utils.getLocalPlayer().UserId
     Utils.setOnClashOn(function() return S.clashOn end)
     Utils.setOnTarget(onTarget)
-    Utils.setOnTeleport(clearClash)
+    Utils.setOnTeleport(onTeleport)
 end
 
 function AutoClash.evaluate(t, hr, ball, config, targetJustChangedToMe)
@@ -347,8 +352,9 @@ end
 
 function AutoClash.resetState()
     S.clashOn, S.clashAt = false, 0
+    S.teleportLockUntil = 0
+    S.deactSoftHit = 0
     S.lastTarget, S.lastTargetAt = -999, 0
-    S.ballGoneSince = 0
     resetTraj()
     _ctxCache.valid = false
 end
