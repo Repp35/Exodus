@@ -37,12 +37,6 @@ local P = {
     RES_HITBOX_PROX       = 12,
     RES_HITBOX_GAP        = 0.4,
 }
-    RES_HOLD_T            = 1.2,
-    RES_DECAY_T           = 4.0,
-    RES_HITBOX_OWN_WINDOW = 0.5,
-    RES_HITBOX_PROX       = 12,
-    RES_HITBOX_GAP        = 0.4,
-}
 
 local PING_EMA, PING_MAX, PING_SAMPLE = 0.5, 0.150, 2.5
 local SYNC_FRESH    = 0.30
