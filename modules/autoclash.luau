@@ -27,6 +27,21 @@ local C = {
     DEACT_TIMEOUT_SPD_FAST = 400, -- acima disso usa o piso
 
     CLASH_HARD_MAX    = 1.4,    -- trava de segurança: nunca passa disso
+
+    -- insta gate (ativação instantânea do autoclashinsta, usado como gate)
+    INSTA_ACT_HARD_CAP   = 22,    -- bDist máximo pra targetJustChangedToMe ativar
+    INSTA_ACT_TIMP_FAST  = 0.085, -- tImp máximo pra targetJustChangedToMe ativar
+
+    INSTA_INV_DIST_CAP   = 25,
+    INSTA_INV_SPD_MIN    = 50,
+    INSTA_INV_DOT_MIN    = 0.35,
+
+    INSTA_DET_DOT_EMA    = 0.25,
+    INSTA_DET_DOT_THRESH = 0.15,
+    INSTA_DET_RAD_MIN    = 14,
+    INSTA_DET_RAD_MAX    = 32,
+    INSTA_DET_RAD_SPD_REF= 120,
+    INSTA_DET_REQUIRE_INSIDE = true,
 }
 
 local S = {
@@ -43,6 +58,8 @@ local S = {
 
     detSignalTraj     = false,
     detSignalTarget   = false,
+    detSignalInsta    = false,
+    instaDotEma       = 0,
     deactSoftHit      = 0,
 
     -- soft-deactivate: último return detectado (traj ou target)
@@ -266,6 +283,76 @@ local function tickTrajectory(t, hr, ball, ctx)
     end
 end
 
+-- ── insta gate (ativação instantânea do autoclashinsta) ─────────────────────
+
+local function getInstaRadius(spd)
+    local k = math.clamp((spd or 0) / C.INSTA_DET_RAD_SPD_REF, 0, 1)
+    return C.INSTA_DET_RAD_MIN
+        + (C.INSTA_DET_RAD_MAX - C.INSTA_DET_RAD_MIN) * k
+end
+
+-- alimenta S.detSignalInsta com a parte "sinal de bola voltando" do insta
+-- (return detector: EMA do dot dentro do raio)
+local function tickInstaSignal(t, hr, ball)
+    S.detSignalInsta = false
+
+    if not (hr and hr.Parent and ball and ball.Parent) then
+        S.instaDotEma = 0
+        return
+    end
+
+    local ok, av = pcall(function()
+        return ball.AssemblyLinearVelocity
+    end)
+    if not (ok and typeof(av) == "Vector3" and av.Magnitude > 1) then
+        return
+    end
+
+    local toMe = hr.Position - ball.Position
+    if toMe.Magnitude < 0.001 then return end
+    local dotRaw = av:Dot(toMe.Unit)
+    local dist = toMe.Magnitude
+    local spd = av.Magnitude
+    local radius = getInstaRadius(spd)
+
+    -- EMA só acumula dentro do alcance (com folga 1.2x); fora zera.
+    if dist <= radius * 1.2 then
+        S.instaDotEma = S.instaDotEma * (1 - C.INSTA_DET_DOT_EMA)
+            + dotRaw * C.INSTA_DET_DOT_EMA
+    else
+        S.instaDotEma = 0
+    end
+
+    if C.INSTA_DET_REQUIRE_INSIDE then
+        if dist <= radius and S.instaDotEma > C.INSTA_DET_DOT_THRESH then
+            S.detSignalInsta = true
+        end
+    else
+        if S.instaDotEma > C.INSTA_DET_DOT_THRESH then
+            S.detSignalInsta = true
+        end
+    end
+end
+
+-- invisible gate do insta: targeted + perto + spd alto + dot alto
+local function instaInvisibleGate(ctx)
+    if not (ctx and ctx.targeted) then return false end
+    if ctx.bDist > C.INSTA_INV_DIST_CAP then return false end
+    if (ctx.spd or 0) < C.INSTA_INV_SPD_MIN then return false end
+    return true
+end
+
+-- "target acabou de virar pra mim + bola já tá caindo" do insta
+local function instaTargetJustChanged(t, ctx, targetJustChangedToMe)
+    if not targetJustChangedToMe then return false end
+    if not ctx then return false end
+    if ctx.bDist > C.INSTA_ACT_HARD_CAP then return false end
+    if not (ctx.tImp and ctx.tImp > 0 and ctx.tImp <= C.INSTA_ACT_TIMP_FAST) then
+        return false
+    end
+    return true
+end
+
 -- ── clash state ──────────────────────────────────────────────────────────────
 
 local function clearClash()
@@ -273,6 +360,8 @@ local function clearClash()
     S.clashAt = 0
     S.deactSoftHit = 0
     S.detSignalTarget = false
+    S.detSignalInsta = false
+    S.instaDotEma = 0
     S.lastReturnAt = 0
     S.lastReturnSpd = 0
 
@@ -286,6 +375,7 @@ local function activateClash(t)
     S.clashAt = t
     S.deactSoftHit = 0
     S.detSignalTarget = false
+    S.detSignalInsta = false
     -- começa "alimentado": qualquer return imediato reativa o timer,
     -- mas se nenhum return chegar, o soft já começa a contar
     S.lastReturnAt = t
@@ -370,17 +460,40 @@ end
 
 -- ── activation ───────────────────────────────────────────────────────────────
 
-local function shouldActivate(t, ctx)
-    if not (S.detSignalTraj or S.detSignalTarget) then
+local function shouldActivate(t, ctx, targetJustChangedToMe)
+    -- qualquer um dos três gates sinalizou → verifica targeting
+    if not (S.detSignalTraj or S.detSignalTarget or S.detSignalInsta) then
+        -- mesmo sem sinal dos detectores, o insta tem 2 atalhos próprios:
+        -- (a) target acabou de virar pra mim + bola caindo
+        -- (b) invisible gate (targeted + perto + rápido)
+        -- esses dois precisam de targeted, então ficam aqui
+        if not instaTargetJustChanged(t, ctx, targetJustChangedToMe) then
+            return false
+        end
+    end
+
+    local targeted = (ctx and ctx.targeted) or isTargeted()
+    if not targeted then
         return false
     end
 
-    return (ctx and ctx.targeted) or isTargeted()
+    -- atalhos do insta (não dependem do detSignalInsta)
+    if instaTargetJustChanged(t, ctx, targetJustChangedToMe) then
+        return true
+    end
+    if instaInvisibleGate(ctx) then
+        return true
+    end
+
+    -- sem atalho: exige algum sinal (traj, target ou insta-detector)
+    return S.detSignalTraj
+        or S.detSignalTarget
+        or S.detSignalInsta
 end
 
 -- ── evaluate ─────────────────────────────────────────────────────────────────
 
-local function evaluateClash(t, hr, ball, config)
+local function evaluateClash(t, hr, ball, config, targetJustChangedToMe)
     if not config
         or config.AutoClash == false
         or _G.PhantomManual then
@@ -403,6 +516,7 @@ local function evaluateClash(t, hr, ball, config)
     local ctx = clashSnapshot()
 
     tickTrajectory(t, hr, ball, ctx)
+    tickInstaSignal(t, hr, ball)
 
     if S.clashOn then
         if shouldDeactivate(t, ctx) then
@@ -412,7 +526,7 @@ local function evaluateClash(t, hr, ball, config)
         return
     end
 
-    if shouldActivate(t, ctx) then
+    if shouldActivate(t, ctx, targetJustChangedToMe) then
         activateClash(t)
     end
 end
@@ -482,8 +596,8 @@ function AutoClash.setup(deps)
     Utils.setOnTeleport(onTeleport)
 end
 
-function AutoClash.evaluate(t, hr, ball, config)
-    evaluateClash(t, hr, ball, config)
+function AutoClash.evaluate(t, hr, ball, config, targetJustChangedToMe)
+    evaluateClash(t, hr, ball, config, targetJustChangedToMe)
 end
 
 function AutoClash.updateDashTrack(t)
@@ -530,6 +644,8 @@ function AutoClash.resetState()
     S.lastTarget = -999
     S.lastTargetAt = 0
     S.detSignalTarget = false
+    S.detSignalInsta = false
+    S.instaDotEma = 0
     S.lastReturnAt = 0
     S.lastReturnSpd = 0
 
