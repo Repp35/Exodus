@@ -572,6 +572,27 @@ local function installAntiDashHooks()
 end
 
 
+-- ball sync handler
+local function onBallSync(data)
+    if typeof(data) ~= "table" then return end
+    local t = Utils and Utils.now() or os.clock()
+    if data.Teleported == true then
+        clearClash()
+        _ctxCache.valid = false
+        return
+    end
+    if type(data.TargetPlayerID) == "number" then
+        local newTarget = data.TargetPlayerID
+        if newTarget ~= S.lastTarget then
+            S.lastTarget, S.lastTargetAt = newTarget, t
+            ringPush(t)
+            local ap = AutoParry and AutoParry.getState and AutoParry.getState() or nil
+            if ap then ap.armed = (newTarget == _localUserId) end
+        end
+    end
+    _ctxCache.valid = false
+end
+
 -- public
 function AutoClash.setup(deps)
     GameInfo, Utils, AutoParry = deps.GameInfo, deps.Utils, deps.AutoParry
@@ -585,6 +606,7 @@ end
 function AutoClash.evaluate(t, hr, ball, config, targetJustChangedToMe)
     evaluateClash(t, hr, ball, config, targetJustChangedToMe)
 end
+function AutoClash.onBallSync(data)                       onBallSync(data) end
 function AutoClash.updateDashTrack(t)                     updateDashTrack(t) end
 function AutoClash.installAntiDashHooks()                 installAntiDashHooks() end
 function AutoClash.getState()                             return S end
