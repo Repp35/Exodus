@@ -493,9 +493,12 @@ end
 function AutoParry.bindParry(character)  bindParry(character) end
 function AutoParry.resetState()          resetState() end
 function AutoParry.onBallSync(data)      onBallSync(data) end
-function AutoParry.resRadiusBonus()      return _resBonusCache end
+function AutoParry.resRadiusBonus()      return resRadiusBonus(Utils.now()) end
 function AutoParry.getPingOneWay()       return pingOneWay() end
 function AutoParry.getSync()             return Sync end
+function AutoParry.isTargeted()          return tgtOn() end
+function AutoParry.getState()            return AP end
+function AutoParry.getBall()             return getBallCached() end
 
 function AutoParry.computeParryRadius(spd, t)
     local p    = pingOneWay()
