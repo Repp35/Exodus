@@ -29,6 +29,13 @@ local P = {
     PING_EMA     = 0.3,
     PING_MAX     = 0.150,
 
+    TRIGGER_TTH  = 0.18,
+    RAD_MIN      = 9,
+    RAD_MAX      = 90,
+    RAD_WIN      = 0.20,
+    RAD_OFF      = 0,
+    RAD_PRE      = 0,
+
     RES_BASE            = 0,
     RES_PER_PARRY       = 0.225,
     RES_CAP             = 32,
@@ -41,7 +48,7 @@ local P = {
 
 -- ── state ───────────────────────────────────────────────────────────────────
 
-local AP = { fired = false, firedAt = 0 }
+local AP = { fired = false, firedAt = 0, wasInRange = false }
 
 local _lastTargetSeen = -999
 local _localUserId    = -1
@@ -388,7 +395,11 @@ local function bindParry(character)
 
         local hx, hy, hz = hrp.Position.X, hrp.Position.Y, hrp.Position.Z
         local dx, dy, dz = hx - bp.X, hy - bp.Y, hz - bp.Z
-        if dx*dx + dy*dy + dz*dz > parryRad * parryRad then return end
+        if dx*dx + dy*dy + dz*dz > parryRad * parryRad then
+            AP.wasInRange = false
+            return
+        end
+        AP.wasInRange = true
 
         if AP.fired then
             if (t - AP.firedAt) >= P.FIRE_TIMEOUT then AP.fired = false end
@@ -396,6 +407,17 @@ local function bindParry(character)
         if AP.fired then return end
         if (t - AP.firedAt) < P.FIRE_LOCK then return end
         if AP.firedAt > Sync.lastAt then return end
+
+        -- gate de confirmação: só dispara se a bola está realmente fechando em você
+        local ok2, av2 = pcall(function() return ball.AssemblyLinearVelocity end)
+        local vel = (ok2 and typeof(av2) == "Vector3") and av2 or nil
+        if not (vel and vel.Magnitude > 0.5) then return end
+        local toMe = hrp.Position - bp
+        local distance = toMe.Magnitude
+        if distance < 1e-4 then return end
+        local currentSpd = vel.Magnitude
+        local timeToHit = distance / currentSpd
+        if timeToHit >= P.TRIGGER_TTH then return end
 
         AP.fired, AP.firedAt = true, t
         if not sendParry() then AP.fired = false end
