@@ -23,16 +23,17 @@ local C = {
 
 	-- target return: era target → deixou de ser → voltou em janela curta = ativa
 	-- convive com return físico (fontes separadas, OR na ativação)
-	TARGET_RETURN_MAX_LO = 0.280, -- janela frouxa @ spd baixa (ativação mais fácil)
-	TARGET_RETURN_MIN_HI = 0.150, -- janela @ spd alta
+	TARGET_RETURN_MAX_LO = 0.190, -- um pouco mais apertado @ spd baixa
+	TARGET_RETURN_MIN_HI = 0.090, -- um pouco mais apertado @ spd alta
 	TARGET_RETURN_SPD_LO = 60,
 	TARGET_RETURN_SPD_HI = 200,
 
 	-- deactivation: ausência de target (evento de sync, separado do return detector)
-	DEACT_TARGET_SPD_LO = 60,   -- bola lenta → timeout maior
-	DEACT_TARGET_SPD_HI = 200,  -- bola rápida → timeout menor
-	DEACT_TIMEOUT_LO = 0.350,   -- timeout @ spd baixa
-	DEACT_TIMEOUT_HI = 0.150,   -- timeout @ spd alta
+	-- timeout curto → desativa fácil
+	DEACT_TARGET_SPD_LO = 60,
+	DEACT_TARGET_SPD_HI = 200,
+	DEACT_TIMEOUT_LO = 0.180,   -- desativa fácil @ spd baixa
+	DEACT_TIMEOUT_HI = 0.080,   -- desativa fácil @ spd alta
 
 	-- lockout/histerese temporal
 	ACTIVE_LOCK = 0.080,
