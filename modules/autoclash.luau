@@ -1,5 +1,4 @@
 -- [[ auto clash ]]
--- Desativação: target saiu + bola se afastando (histerese dupla)
 
 local AutoClash = {}
 
@@ -7,7 +6,7 @@ local GameInfo
 local Utils
 local AutoParry
 
--- ── constants ────────────────────────────────────────────────────────────────
+-- ── tunable ──────────────────────────────────────────────────────────────────
 
 local C = {
     ACT_RAD_FACTOR = 1.40,
@@ -28,13 +27,13 @@ local C = {
     TARGET_RETURN_SPD_LO = 60,
     TARGET_RETURN_SPD_HI = 200,
 
-    -- Desativação: tImp < 0 continuamente por X tempo (varia com speed)
-    -- tImp < 0 = bola já passou de mim, está se afastando
-    -- thresholds baseados na ativação (~190ms), com folga
-    DEACT_TIMP_SPD_LO = 60,
-    DEACT_TIMP_SPD_HI = 200,
-    DEACT_TIMP_T_LO   = 0.300,  -- 300ms em speed baixa
-    DEACT_TIMP_T_HI   = 0.150,  -- 150ms em speed alta
+    -- deactivation por tImp com histerese
+    DEACT_TIMP_HIGH = 0.25,   -- desativa quando tImp > isso
+    DEACT_TIMP_FRAMES = 2,    -- frames consecutivos pra confirmar
+    DEACT_GONE_DIST = 65,     -- bola sumida
+
+    -- target loss
+    TARGET_LOSS_TIMEOUT = 0.20,
 
     TELEPORT_LOCK = 0.20,
 }
@@ -56,8 +55,8 @@ local S = {
     wasMeTarget = false,
     lostMeAt = 0,
 
-    -- tImp < 0 continuamente desde este timestamp (0 = bola não está se afastando)
-    timpAwaySince = 0,
+    -- deact tracking
+    deactFrames = 0,
 
     teleportLockUntil = 0,
 }
@@ -76,11 +75,7 @@ local function getMyHRP()
     local player = getLocalPlayer()
     local character = player and player.Character
 
-    if not character then
-        return nil
-    end
-
-    return character:FindFirstChild("HumanoidRootPart")
+    return character and character:FindFirstChild("HumanoidRootPart")
 end
 
 local function getBall()
@@ -91,9 +86,9 @@ local function isTargeted()
     return AutoParry.isTargeted()
 end
 
-local function getBallSpeed(ball)
+local function getBallVelocity(ball)
     if not ball or not ball.Parent then
-        return 0
+        return nil
     end
 
     local ok, velocity = pcall(function()
@@ -101,19 +96,19 @@ local function getBallSpeed(ball)
     end)
 
     if not ok or typeof(velocity) ~= "Vector3" then
-        return 0
+        return nil
     end
 
-    return velocity.Magnitude
+    return velocity
 end
 
-local function lerpBySpeed(
-    speed,
-    speedLow,
-    speedHigh,
-    valueLow,
-    valueHigh
-)
+local function getBallSpeed(ball)
+    local velocity = getBallVelocity(ball)
+
+    return velocity and velocity.Magnitude or 0
+end
+
+local function lerpBySpeed(speed, speedLow, speedHigh, valueLow, valueHigh)
     if speedHigh <= speedLow then
         return valueLow
     end
@@ -128,7 +123,11 @@ local function lerpBySpeed(
 end
 
 local function getDetectorRadius(speed)
-    local alpha = math.clamp(speed / C.DET_RAD_SPD_REF, 0, 1)
+    local alpha = math.clamp(
+        speed / C.DET_RAD_SPD_REF,
+        0,
+        1
+    )
 
     return C.DET_RAD_MIN
         + (C.DET_RAD_MAX - C.DET_RAD_MIN) * alpha
@@ -146,17 +145,12 @@ end
 local function activate(t)
     S.active = true
     S.activeAt = t
-
-    S.timpAwaySince = 0
     resetDetector()
 end
 
 local function deactivate()
     S.active = false
     S.activeAt = 0
-
-    S.timpAwaySince = 0
-    resetDetector()
 end
 
 -- ── return detector ──────────────────────────────────────────────────────────
@@ -171,13 +165,6 @@ local function getDetectorReturnWindow(speed)
     )
 end
 
-local function resetDetectorState()
-    S.detPhase = "IDLE"
-    S.detEnterAt = 0
-    S.detExitAt = 0
-    S.detMinDist = 0
-end
-
 local function tickReturnDetector(t, hr, ball)
     if not (
         hr
@@ -185,24 +172,21 @@ local function tickReturnDetector(t, hr, ball)
         and ball
         and ball.Parent
     ) then
-        resetDetectorState()
+        resetDetector()
         return false
     end
 
-    local velocity
-    local ok = pcall(function()
-        velocity = ball.AssemblyLinearVelocity
-    end)
+    local velocity = getBallVelocity(ball)
 
-    if not ok or typeof(velocity) ~= "Vector3" then
-        resetDetectorState()
+    if not velocity then
+        resetDetector()
         return false
     end
 
     local speed = velocity.Magnitude
 
     if speed <= 1 then
-        resetDetectorState()
+        resetDetector()
         return false
     end
 
@@ -210,7 +194,7 @@ local function tickReturnDetector(t, hr, ball)
     local distance = offset.Magnitude
 
     if distance <= 0.001 then
-        resetDetectorState()
+        resetDetector()
         return false
     end
 
@@ -218,14 +202,14 @@ local function tickReturnDetector(t, hr, ball)
     local coming = velocity:Dot(offset.Unit) > 0
 
     if distance > radius * 1.2 then
-        resetDetectorState()
+        resetDetector()
         return false
     end
 
     if S.detPhase == "EXITED"
         and t - S.detExitAt > C.DET_TIMEOUT
     then
-        resetDetectorState()
+        resetDetector()
     end
 
     if S.detPhase == "IDLE" then
@@ -239,7 +223,10 @@ local function tickReturnDetector(t, hr, ball)
     end
 
     if S.detPhase == "INSIDE" then
-        S.detMinDist = math.min(S.detMinDist, distance)
+        S.detMinDist = math.min(
+            S.detMinDist,
+            distance
+        )
 
         if distance > S.detMinDist + C.DET_DIST_DELTA then
             S.detPhase = "EXITED"
@@ -262,9 +249,7 @@ local function tickReturnDetector(t, hr, ball)
             S.detEnterAt = t
             S.detMinDist = distance
 
-            if elapsed <= window then
-                return true
-            end
+            return elapsed <= window
         end
     end
 
@@ -290,78 +275,66 @@ local function shouldActivate(t, hr, ball)
 end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
--- Critério: tImp < 0 continuamente por X ms (X varia com speed).
--- tImp < 0 = bola já passou de mim, está se afastando.
 
--- pega raio de parry real do AutoParry (com fallback conservador)
-local PARRY_RAD_FALLBACK = 14
-local function getParryRadius(speed, t)
-    local parryRadius = PARRY_RAD_FALLBACK
-    if AutoParry and type(AutoParry.getParryRadius) == "function" then
-        local v = AutoParry.getParryRadius(speed, t)
-        if type(v) == "number" and v > 0 then
-            parryRadius = v
-        end
+local function computeTImp(hr, ball)
+    if not (hr and hr.Parent and ball and ball.Parent) then
+        return math.huge
     end
-    return parryRadius
-end
 
--- mesmo tImp do AutoParry: (dist - parryRad) / speed
--- < 0 = bola passou, está se afastando
-local function computeTImp(hr, ball, speed, t)
-    local parryRad = getParryRadius(speed, t)
-    local dist = (hr.Position - ball.Position).Magnitude
-    return (dist - parryRad) / speed, parryRad
-end
+    local offset = hr.Position - ball.Position
+    local dist = offset.Magnitude
 
--- threshold ajustado por velocidade (rápido = desativa mais rápido)
-local function getDeactTimpT(speed)
-    return lerpBySpeed(
-        speed,
-        C.DEACT_TIMP_SPD_LO,
-        C.DEACT_TIMP_SPD_HI,
-        C.DEACT_TIMP_T_LO,
-        C.DEACT_TIMP_T_HI
-    )
+    local velocity = getBallVelocity(ball)
+    if not velocity or velocity.Magnitude < 1 then
+        return math.huge
+    end
+
+    -- tImp = distância / velocidade na sua direção
+    local speed = velocity.Magnitude
+    local dotProduct = velocity:Dot(offset.Unit)
+
+    -- se bola não está vindo em sua direção, tImp é infinito
+    if dotProduct <= 0 then
+        return math.huge
+    end
+
+    return dist / dotProduct
 end
 
 local function shouldDeactivate(t, hr, ball)
-    -- hard fails (sempre desativa)
+    -- hard: teleporte
     if t < S.teleportLockUntil then
         return true
     end
 
-    if not hr or not hr.Parent then
+    -- hard: bola ou player não existe
+    if not (hr and hr.Parent and ball and ball.Parent) then
         return true
     end
 
-    if not ball or not ball.Parent then
+    -- hard: bola sumiu
+    local offset = hr.Position - ball.Position
+    if offset.Magnitude > C.DEACT_GONE_DIST then
+        S.deactFrames = 0
         return true
     end
 
-    local speed = getBallSpeed(ball)
-    if speed <= 1 then
+    -- hard: perdeu target há muito tempo
+    if not isTargeted() and (t - S.lastTargetAt) > C.TARGET_LOSS_TIMEOUT then
+        S.deactFrames = 0
         return true
     end
 
-    -- calcula tImp
-    local tImp, _parryRad = computeTImp(hr, ball, speed, t)
+    -- soft: tImp muito alto com histerese
+    local timp = computeTImp(hr, ball)
 
-    -- Timer: bola se afastando (tImp < 0) continuamente
-    if tImp < 0 then
-        if S.timpAwaySince == 0 then
-            S.timpAwaySince = t
-        end
-    else
-        S.timpAwaySince = 0
-    end
-
-    -- Desativa só se ficou se afastando pelo tempo mínimo
-    if S.timpAwaySince > 0 then
-        local timpAwayFor = t - S.timpAwaySince
-        if timpAwayFor >= getDeactTimpT(speed) then
+    if timp > C.DEACT_TIMP_HIGH then
+        S.deactFrames = S.deactFrames + 1
+        if S.deactFrames >= C.DEACT_TIMP_FRAMES then
             return true
         end
+    else
+        S.deactFrames = 0
     end
 
     return false
@@ -403,12 +376,8 @@ local function evaluate(t, hr, ball, config)
         return
     end
 
-    if S.active then
-        if shouldDeactivate(t, hr, ball) then
-            deactivate()
-        end
-
-        return
+    if S.active and shouldDeactivate(t, hr, ball) then
+        deactivate()
     end
 
     if shouldActivate(t, hr, ball) then
@@ -445,6 +414,7 @@ local function onTarget(newTarget, t)
     S.lastTargetAt = t
 
     local getState = AutoParry.getState
+
     if type(getState) == "function" then
         local state = getState()
 
@@ -471,10 +441,8 @@ local function onTarget(newTarget, t)
     local window = getTargetReturnWindow(speed)
     local elapsed = t - S.lostMeAt
 
-    if elapsed <= window then
-        if not S.active then
-            activate(t)
-        end
+    if elapsed <= window and not S.active then
+        activate(t)
     end
 
     S.wasMeTarget = false
@@ -482,9 +450,7 @@ local function onTarget(newTarget, t)
 end
 
 local function onTeleport()
-    local t = now()
-
-    S.teleportLockUntil = t + C.TELEPORT_LOCK
+    S.teleportLockUntil = now() + C.TELEPORT_LOCK
     deactivate()
 end
 
@@ -563,7 +529,7 @@ function AutoClash.resetState()
     S.wasMeTarget = false
     S.lostMeAt = 0
 
-    S.timpAwaySince = 0
+    S.deactFrames = 0
 
     S.teleportLockUntil = 0
 
