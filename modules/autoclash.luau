@@ -28,14 +28,8 @@ local C = {
     TARGET_RETURN_SPD_LO = 60,
     TARGET_RETURN_SPD_HI = 200,
 
-    -- NOVO: desativação por histerese target + tImp
-    -- target precisa estar fora por 250ms (espelho + folga da ativação)
-    -- E a bola precisa estar se afastando (tImp < 0) por 100ms contínuos
-    DEACT_TARGET_LOST_T = 0.250,
-    DEACT_TIMP_AWAY_T   = 0.100,
-
-    -- fallback se AutoParry não responder
-    PARRY_RAD_FALLBACK = 14,
+    -- TODO: refazer lógica de desativação
+    -- (heurísticas target+tImp estavam anulando a ativação)
 
     TELEPORT_LOCK = 0.20,
 }
@@ -56,10 +50,6 @@ local S = {
     lastTargetAt = 0,
     wasMeTarget = false,
     lostMeAt = 0,
-
-    -- NOVO: timers da histerese de desativação
-    targetLostAt   = 0, -- 0 = target ainda em mim
-    timpAwaySince  = 0, -- 0 = bola não está se afastando
 
     teleportLockUntil = 0,
 }
@@ -149,20 +139,12 @@ local function activate(t)
     S.active = true
     S.activeAt = t
 
-    -- zera timers de desativação
-    S.targetLostAt = 0
-    S.timpAwaySince = 0
-
     resetDetector()
 end
 
 local function deactivate()
     S.active = false
     S.activeAt = 0
-
-    -- zera timers
-    S.targetLostAt = 0
-    S.timpAwaySince = 0
 
     resetDetector()
 end
@@ -298,32 +280,10 @@ local function shouldActivate(t, hr, ball)
 end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
+-- TODO: refazer lógica de desativação (heurísticas target+tImp estavam
+-- anulando a ativação). Por ora, só hard fails (teleport, refs mortas).
 
--- pega raio de parry real do AutoParry (com fallback)
-local function getParryRadius(speed, t)
-    local parryRadius = C.PARRY_RAD_FALLBACK
-    if AutoParry and type(AutoParry.getParryRadius) == "function" then
-        local v = AutoParry.getParryRadius(speed, t)
-        if type(v) == "number" and v > 0 then
-            parryRadius = v
-        end
-    end
-    return parryRadius
-end
-
--- calcula tImp igual ao AutoParry: (dist - parryRad) / speed
--- tImp < 0 = bola já passou de mim, está se afastando
-local function computeTImp(hr, ball, speed)
-    local parryRad = getParryRadius(speed, now())
-    local dist = (hr.Position - ball.Position).Magnitude
-    local tImp = (dist - parryRad) / speed
-    if tImp < 0 then tImp = 0 end
-    return tImp, parryRad
-end
-
--- histerese dupla: target perdido + bola se afastando
 local function shouldDeactivate(t, hr, ball)
-    -- hard fails (sempre desativa, sem histerese)
     if t < S.teleportLockUntil then
         return true
     end
@@ -333,51 +293,6 @@ local function shouldDeactivate(t, hr, ball)
     end
 
     if not ball or not ball.Parent then
-        return true
-    end
-
-    local speed = getBallSpeed(ball)
-    if speed <= 1 then
-        -- bola parada, sem clash possível
-        return true
-    end
-
-    local tImp, parryRad = computeTImp(hr, ball, speed)
-    local distance = (hr.Position - ball.Position).Magnitude
-
-    -- "se afastando de verdade" = bola passou do parry radius E está
-    -- a uma distância significativamente maior (não é só uma oscilação
-    -- na borda). Evita desativar no meio do clash quando a bola vai
-    -- e volta do rebatedor.
-    local farFromParry = distance > parryRad * 1.5
-    local timpIsAway = tImp < 0 and farFromParry
-
-    -- ── Timer 1: target perdido ───────────────────────────────────────────
-    if isTargeted() then
-        S.targetLostAt = 0
-    else
-        if S.targetLostAt == 0 then
-            S.targetLostAt = t
-        end
-    end
-
-    -- ── Timer 2: bola se afastando (tImp < 0) CONSISTENTEMENTE ──────────
-    -- reseta se tImp >= 0 em qualquer frame (bola voltou a vir em minha direção)
-    if tImp < 0 then
-        if S.timpAwaySince == 0 then
-            S.timpAwaySince = t
-        end
-    else
-        S.timpAwaySince = 0
-    end
-
-    -- ── Decisão: ambos precisam estar "velhos" ao mesmo tempo ───────────
-    local targetLostFor = (S.targetLostAt > 0) and (t - S.targetLostAt) or 0
-    local timpAwayFor   = (S.timpAwaySince > 0) and (t - S.timpAwaySince) or 0
-
-    if targetLostFor >= C.DEACT_TARGET_LOST_T
-        and timpAwayFor >= C.DEACT_TIMP_AWAY_T
-    then
         return true
     end
 
@@ -476,22 +391,11 @@ local function onTarget(newTarget, t)
     if wasMe and not isMe then
         S.wasMeTarget = true
         S.lostMeAt = t
-
-        -- target saiu: começa a contar para desativação
-        if S.active and S.targetLostAt == 0 then
-            S.targetLostAt = t
-        end
-
         return
     end
 
     if not isMe or wasMe or not S.wasMeTarget then
         return
-    end
-
-    -- target voltou pra mim: zera timer de desativação
-    if S.active then
-        S.targetLostAt = 0
     end
 
     local ball = getBall()
@@ -590,9 +494,6 @@ function AutoClash.resetState()
     S.lastTargetAt = 0
     S.wasMeTarget = false
     S.lostMeAt = 0
-
-    S.targetLostAt = 0
-    S.timpAwaySince = 0
 
     S.teleportLockUntil = 0
 
