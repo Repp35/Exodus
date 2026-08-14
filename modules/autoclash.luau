@@ -21,22 +21,16 @@ local C = {
 	DET_RETURN_SPD_LO = 60,
 	DET_RETURN_SPD_HI = 200,
 
-	-- target return: era target → deixou de ser → voltou em janela curta = ativa
-	-- convive com return físico (fontes separadas, OR na ativação)
-	-- apertado com folga: rejeita oscilação lenta, pega return rápido
-	TARGET_RETURN_MAX_LO = 0.140, -- @ spd baixa
-	TARGET_RETURN_MIN_HI = 0.070, -- @ spd alta
+	TARGET_RETURN_MAX_LO = 0.100,
+	TARGET_RETURN_MIN_HI = 0.050,
 	TARGET_RETURN_SPD_LO = 60,
 	TARGET_RETURN_SPD_HI = 200,
 
-	-- deactivation: ausência de target (evento de sync, separado do return detector)
-	-- timeout bem curto → desativa rápido e fácil
 	DEACT_TARGET_SPD_LO = 60,
 	DEACT_TARGET_SPD_HI = 200,
-	DEACT_TIMEOUT_LO = 0.120,   -- desativa rápido @ spd baixa
-	DEACT_TIMEOUT_HI = 0.060,   -- desativa quase instantâneo @ spd alta
+	DEACT_TIMEOUT_LO = 0.100,
+	DEACT_TIMEOUT_HI = 0.050,
 
-	-- lockout/histerese temporal
 	ACTIVE_LOCK = 0.080,
 	INACTIVE_LOCK = 0.080,
 }
@@ -56,9 +50,9 @@ local S = {
 
 	lastTarget = -999,
 	lastTargetAt = 0,
-	lastTimeWasTarget = 0, -- timestamp da última vez que fui target (driver da deactivation)
-	wasMeTarget = false,   -- driver do target return (ativação)
-	lostMeAt = 0,          -- quando perdi o target (pra medir "voltei rápido")
+	lastTimeWasTarget = 0,
+	wasMeTarget = false,
+	lostMeAt = 0,
 
 	teleportLockUntil = 0,
 }
@@ -156,9 +150,8 @@ local function activate(t)
 	S.active = true
 	S.activeAt = t
 	S.inactiveAt = 0
-	-- reseta o timer de deactivation: agora a "ausência de target" começa a contar
-	-- a partir do instante da ativação, não do último sync antigo
 	S.lastTimeWasTarget = t
+
 	resetDetector()
 
 	return true
@@ -176,6 +169,7 @@ local function deactivate(t)
 	S.active = false
 	S.activeAt = 0
 	S.inactiveAt = t
+
 	resetDetector()
 
 	return true
@@ -185,12 +179,13 @@ local function forceDeactivate(t)
 	S.active = false
 	S.activeAt = 0
 	S.inactiveAt = t
+
 	resetDetector()
+
 	return true
 end
 
--- ── return detector (ativação) ───────────────────────────────────────────────
--- INTOCADO: é a fonte da ativação. Não pode ser usado para desativar.
+-- ── return detector ──────────────────────────────────────────────────────────
 
 local function getDetectorReturnWindow(speed)
 	return lerpBySpeed(
@@ -204,11 +199,11 @@ end
 
 local function tickReturnDetector(t, hr, ball)
 	if not (
-			hr
-			and hr.Parent
-			and ball
-			and ball.Parent
-		) then
+		hr
+		and hr.Parent
+		and ball
+		and ball.Parent
+	) then
 		resetDetector()
 		return false
 	end
@@ -244,7 +239,7 @@ local function tickReturnDetector(t, hr, ball)
 	end
 
 	if S.detPhase == "EXITED"
-		and t - S.detExitAt > C.DET_TIMEOUT
+		and t - S.detExitAt > C.DET_RETURN_MAX_LO
 	then
 		resetDetector()
 	end
@@ -293,9 +288,7 @@ local function tickReturnDetector(t, hr, ball)
 	return false
 end
 
--- ── target return (ativação) ────────────────────────────────────────────────
--- "era meu target → deixou de ser → voltou rápido" = ativa
--- Fonte: sync de target. Independente do return detector (física).
+-- ── target return ────────────────────────────────────────────────────────────
 
 local function getTargetReturnWindow(speed)
 	return lerpBySpeed(
@@ -308,7 +301,6 @@ local function getTargetReturnWindow(speed)
 end
 
 local function tickTargetReturn(t, ball)
-	-- precisa estar armado E ser target agora (a "volta" do ciclo)
 	if not (S.wasMeTarget and isTargeted()) then
 		return false
 	end
@@ -317,7 +309,6 @@ local function tickTargetReturn(t, ball)
 	local window = getTargetReturnWindow(speed)
 	local elapsed = t - S.lostMeAt
 
-	-- consome o evento (one-shot)
 	S.wasMeTarget = false
 	S.lostMeAt = 0
 
@@ -335,22 +326,16 @@ local function shouldActivate(t, hr, ball)
 		return false
 	end
 
-	-- return físico OU target return (fontes separadas, OR)
 	if tickReturnDetector(t, hr, ball) then
 		return true
 	end
 
-	-- target return não exige isTargeted() aqui: o wasMeTarget armou o ciclo
-	-- "perdi → voltei" e a própria função checa a janela internamente
 	return tickTargetReturn(t, ball)
 end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
--- Mede AUSÊNCIA de target (evento de sync do servidor).
--- Fonte completamente diferente do return detector, não conflita com ativação.
 
 local function getDeactivateTimeout(speed)
-	-- bola rápida → timeout curto; bola lenta → timeout longo
 	return lerpBySpeed(
 		speed,
 		C.DEACT_TARGET_SPD_LO,
@@ -361,18 +346,19 @@ local function getDeactivateTimeout(speed)
 end
 
 local function shouldDeactivate(t, hr, ball)
-	-- panic: teleporte
 	if t < S.teleportLockUntil then
 		return true
 	end
 
-	-- panic: bola ou player não existe
-	if not (hr and hr.Parent and ball and ball.Parent) then
+	if not (
+		hr
+		and hr.Parent
+		and ball
+		and ball.Parent
+	) then
 		return true
 	end
 
-	-- GATE: target demorou mais que o timeout pra voltar (= não é return)
-	-- em clash, o target volta em ms → sinceTarget < timeout → bloqueado aqui
 	local speed = getBallSpeed(ball)
 	local timeout = getDeactivateTimeout(speed)
 	local sinceTarget = t - S.lastTimeWasTarget
@@ -381,12 +367,9 @@ local function shouldDeactivate(t, hr, ball)
 		return false
 	end
 
-	-- CONFIRMAÇÃO: passou do gate, agora checa se a bola foi embora (dot ≤ 0)
-	-- dot > 0 = bola ainda voltando / vindo → segura mais um pouco
-	-- dot ≤ 0 = bola já tá se afastando → desativa
 	local velocity = getBallVelocity(ball)
+
 	if not velocity or speed <= 1 then
-		-- sem velocidade válida: conservador, desativa
 		return true
 	end
 
@@ -397,9 +380,7 @@ local function shouldDeactivate(t, hr, ball)
 		return true
 	end
 
-	local movingAway = velocity:Dot(offset.Unit) <= 0
-
-	return movingAway
+	return velocity:Dot(offset.Unit) <= 0
 end
 
 -- ── evaluate ─────────────────────────────────────────────────────────────────
@@ -412,29 +393,29 @@ local function evaluate(t, hr, ball, config)
 
 	if not enabled then
 		S.enabled = false
-		forceDeactivate(now())
+		forceDeactivate(t)
 		return
 	end
 
 	if GameInfo.isGrace() then
-		forceDeactivate(now())
+		forceDeactivate(t)
 		return
 	end
 
 	S.enabled = true
 
 	if not hr or not hr.Parent then
-		forceDeactivate(now())
+		forceDeactivate(t)
 		return
 	end
 
 	if not ball or not ball.Parent then
-		forceDeactivate(now())
+		forceDeactivate(t)
 		return
 	end
 
 	if t < S.teleportLockUntil then
-		forceDeactivate(now())
+		forceDeactivate(t)
 		return
 	end
 
@@ -442,10 +423,8 @@ local function evaluate(t, hr, ball, config)
 		if shouldDeactivate(t, hr, ball) then
 			deactivate(t)
 		end
-	else
-		if shouldActivate(t, hr, ball) then
-			activate(t)
-		end
+	elseif shouldActivate(t, hr, ball) then
+		activate(t)
 	end
 end
 
@@ -470,12 +449,10 @@ local function onTarget(newTarget, t)
 	local isMe = newTarget == userId
 	local wasMe = previousTarget == userId
 
-	-- marca timestamp sempre que o target for eu (driver da deactivation)
 	if isMe then
 		S.lastTimeWasTarget = t
 	end
 
-	-- detecta "era meu target → deixou de ser" (arma target return)
 	if wasMe and not isMe then
 		S.wasMeTarget = true
 		S.lostMeAt = t
@@ -493,8 +470,10 @@ local function onTarget(newTarget, t)
 end
 
 local function onTeleport()
-	S.teleportLockUntil = now() + 0.5
-	forceDeactivate(now())
+	local t = now()
+
+	S.teleportLockUntil = t + 0.5
+	forceDeactivate(t)
 end
 
 -- ── public ───────────────────────────────────────────────────────────────────
