@@ -30,11 +30,11 @@ local C = {
 	TARGET_RETURN_SPD_HI = 200,
 
 	-- deactivation: ausência de target (evento de sync, separado do return detector)
-	-- timeout curto → desativa fácil
+	-- timeout bem curto → desativa rápido e fácil
 	DEACT_TARGET_SPD_LO = 60,
 	DEACT_TARGET_SPD_HI = 200,
-	DEACT_TIMEOUT_LO = 0.180,   -- desativa fácil @ spd baixa
-	DEACT_TIMEOUT_HI = 0.080,   -- desativa fácil @ spd alta
+	DEACT_TIMEOUT_LO = 0.120,   -- desativa rápido @ spd baixa
+	DEACT_TIMEOUT_HI = 0.060,   -- desativa quase instantâneo @ spd alta
 
 	-- lockout/histerese temporal
 	ACTIVE_LOCK = 0.080,
@@ -156,6 +156,9 @@ local function activate(t)
 	S.active = true
 	S.activeAt = t
 	S.inactiveAt = 0
+	-- reseta o timer de deactivation: agora a "ausência de target" começa a contar
+	-- a partir do instante da ativação, não do último sync antigo
+	S.lastTimeWasTarget = t
 	resetDetector()
 
 	return true
@@ -305,6 +308,7 @@ local function getTargetReturnWindow(speed)
 end
 
 local function tickTargetReturn(t, ball)
+	-- precisa estar armado E ser target agora (a "volta" do ciclo)
 	if not (S.wasMeTarget and isTargeted()) then
 		return false
 	end
@@ -336,11 +340,9 @@ local function shouldActivate(t, hr, ball)
 		return true
 	end
 
-	if isTargeted() then
-		return tickTargetReturn(t, ball)
-	end
-
-	return false
+	-- target return não exige isTargeted() aqui: o wasMeTarget armou o ciclo
+	-- "perdi → voltei" e a própria função checa a janela internamente
+	return tickTargetReturn(t, ball)
 end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
