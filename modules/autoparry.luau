@@ -84,6 +84,9 @@ local function getBall()
 end
 
 local function isTargeted()
+    if not AutoParry or type(AutoParry.isTargeted) ~= "function" then
+        return false
+    end
     return AutoParry.isTargeted()
 end
 
