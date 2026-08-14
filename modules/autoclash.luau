@@ -23,8 +23,10 @@ local C = {
 
 	-- target return: era target → deixou de ser → voltou em janela curta = ativa
 	-- convive com return físico (fontes separadas, OR na ativação)
-	TARGET_RETURN_MAX_LO = 0.190, -- um pouco mais apertado @ spd baixa
-	TARGET_RETURN_MIN_HI = 0.090, -- um pouco mais apertado @ spd alta
+	-- faixa útil: entre o que o auto parry já pega (>333ms) e o clash mortal (<50ms)
+	-- mira: 70-200ms (a bola rápida reduz a janela)
+	TARGET_RETURN_MAX_LO = 0.200, -- @ spd baixa (auto parry lento já cobre, clash rápido é mais apertado)
+	TARGET_RETURN_MIN_HI = 0.070, -- @ spd alta (deixa o clash puro passar)
 	TARGET_RETURN_SPD_LO = 60,
 	TARGET_RETURN_SPD_HI = 200,
 
