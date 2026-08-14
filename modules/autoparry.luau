@@ -11,7 +11,7 @@ local P = {
     MIN_SPD = 5,
     DEFLECT_R = 8.5,        -- raio base
     RAD_FLOOR = 14,         -- ainda usado como piso do clamp
-    RAD_CAP = 30,           -- teto do clamp
+    RAD_CAP = 32,           -- teto do clamp
     PING_FLOOR = 0.030,
     PING_CAP = 0.150,
 
