@@ -1,5 +1,3 @@
-Auto Clash — Refatorado
-
 -- [[ auto clash ]]
 
 local AutoClash = {}
