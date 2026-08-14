@@ -27,10 +27,15 @@ local C = {
     TARGET_RETURN_SPD_LO = 60,
     TARGET_RETURN_SPD_HI = 200,
 
-    DEACT_FLOOR_BASE = 14,
-    DEACT_FLOOR_SPD_REF = 120,
-    DEACT_FLOOR_MAX_SCALE = 2.5,
+    -- piso de desativação: sempre >= parry radius * FLOOR_MARGIN_BASE
+    -- e cresce com a velocidade. Garante que o clash não desliga por
+    -- oscilação de 1-2 studs na borda do parry radius.
+    DEACT_FLOOR_MARGIN_BASE = 1.4, -- piso = parry_radius * 1.4 (mín)
+    DEACT_FLOOR_MARGIN_HI  = 2.0, -- piso = parry_radius * 2.0 (máx)
+    DEACT_FLOOR_SPD_LO = 60,
+    DEACT_FLOOR_SPD_HI = 200,
 
+    -- timeout pra desativar FORA do piso, sem a bola voltar
     DEACT_NO_RETURN_MAX_LO = 0.150,
     DEACT_NO_RETURN_MIN_HI = 0.150,
     DEACT_NO_RETURN_SPD_LO = 60,
@@ -289,14 +294,28 @@ end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
 
-local function getDeactFloor(speed)
-    local scale = math.clamp(
-        speed / C.DEACT_FLOOR_SPD_REF,
-        0,
-        C.DEACT_FLOOR_MAX_SCALE
+local function getDeactFloor(speed, t)
+    -- raio de parry real (varia com speed + res, vem do AutoParry)
+    local parryRadius = 14 -- fallback conservador
+    if AutoParry and type(AutoParry.getParryRadius) == "function" then
+        local v = AutoParry.getParryRadius(speed, t)
+        if type(v) == "number" and v > 0 then
+            parryRadius = v
+        end
+    end
+
+    -- margem: 1.4x (speed baixa) → 2.0x (speed alta)
+    -- piso sempre MAIOR que o raio de parry → bola pode oscilar na
+    -- borda do parry sem o clash desligar
+    local margin = lerpBySpeed(
+        speed,
+        C.DEACT_FLOOR_SPD_LO,
+        C.DEACT_FLOOR_SPD_HI,
+        C.DEACT_FLOOR_MARGIN_BASE,
+        C.DEACT_FLOOR_MARGIN_HI
     )
 
-    return C.DEACT_FLOOR_BASE + (8 * scale)
+    return parryRadius * margin
 end
 
 local function getNoReturnTimeout(speed)
@@ -327,16 +346,12 @@ local function shouldDeactivate(t, hr, ball)
     local speed = getBallSpeed(ball)
 
     -- floor: dentro do piso, não desativa (bola ainda na zona ativa)
-    local floor = getDeactFloor(speed)
+    local floor = getDeactFloor(speed, t)
     if distance <= floor then
-        -- mantém lastReturnAt fresco se a bola tá vindo (evita desativar cedo)
-        local ok, velocity = pcall(function() return ball.AssemblyLinearVelocity end)
-        if ok and typeof(velocity) == "Vector3" and velocity.Magnitude > 1 then
-            local toMe = hr.Position - ball.Position
-            if toMe.Magnitude > 0.001 and velocity:Dot(toMe.Unit) > 0 then
-                S.lastReturnAt = t
-            end
-        end
+        -- bola na zona de clash: refresca o "último retorno" sempre,
+        -- independente da direção (após rebater ela fica parada/indo embora
+        -- por alguns frames, mas ainda tá no meio do clash)
+        S.lastReturnAt = t
         return false
     end
 
