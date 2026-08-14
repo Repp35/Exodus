@@ -33,9 +33,9 @@ local C = {
     DEACT_GONE_DIST = 65,     -- bola sumida
 
     -- target loss
-    TARGET_LOSS_TIMEOUT = 0.20,
-
-    TELEPORT_LOCK = 0.20,
+    -- lockout/histerese temporal
+    ACTIVE_LOCK  = 0.080,   -- tempo mínimo ativo antes de poder desativar
+    INACTIVE_LOCK = 0.080,  -- tempo mínimo inativo antes de poder ativar
 }
 
 -- ── state ────────────────────────────────────────────────────────────────────
@@ -44,6 +44,7 @@ local S = {
     enabled = false,
     active = false,
     activeAt = 0,
+    inactiveAt = 0,
 
     detPhase = "IDLE",
     detEnterAt = 0,
@@ -145,12 +146,17 @@ end
 local function activate(t)
     S.active = true
     S.activeAt = t
+    S.inactiveAt = 0
+    S.deactFrames = 0
     resetDetector()
 end
 
-local function deactivate()
+local function deactivate(t)
     S.active = false
     S.activeAt = 0
+    S.inactiveAt = t
+    S.deactFrames = 0
+    resetDetector()
 end
 
 -- ── return detector ──────────────────────────────────────────────────────────
@@ -300,38 +306,40 @@ local function evaluate(t, hr, ball, config)
 
     if not enabled then
         S.enabled = false
-        deactivate()
+        deactivate(now())
         return
     end
 
     if GameInfo.isGrace() then
-        deactivate()
+        deactivate(now())
         return
     end
 
     S.enabled = true
 
     if not hr or not hr.Parent then
-        deactivate()
+        deactivate(now())
         return
     end
 
     if not ball or not ball.Parent then
-        deactivate()
+        deactivate(now())
         return
     end
 
     if t < S.teleportLockUntil then
-        deactivate()
+        deactivate(now())
         return
     end
 
-    if S.active and shouldDeactivate(t, hr, ball) then
-        deactivate()
-    end
-
-    if shouldActivate(t, hr, ball) then
-        activate(t)
+    if S.active then
+        if (t - S.activeAt) >= C.ACTIVE_LOCK and shouldDeactivate(t, hr, ball) then
+            deactivate(t)
+        end
+    elseif (t - S.inactiveAt) >= C.INACTIVE_LOCK then
+        if shouldActivate(t, hr, ball) then
+            activate(t)
+        end
     end
 end
 
@@ -401,7 +409,7 @@ end
 
 local function onTeleport()
     S.teleportLockUntil = now() + C.TELEPORT_LOCK
-    deactivate()
+    deactivate(now())
 end
 
 -- ── public ───────────────────────────────────────────────────────────────────
@@ -473,6 +481,7 @@ function AutoClash.resetState()
     S.enabled = false
     S.active = false
     S.activeAt = 0
+    S.inactiveAt = 0
 
     S.lastTarget = -999
     S.lastTargetAt = 0
@@ -487,7 +496,7 @@ function AutoClash.resetState()
 end
 
 function AutoClash.forceClear()
-    deactivate()
+    deactivate(now())
 end
 
 if _G.ExodusModules then
