@@ -31,8 +31,8 @@ local C = {
     DEACT_FLOOR_SPD_REF = 120,
     DEACT_FLOOR_MAX_SCALE = 2.5,
 
-    DEACT_NO_RETURN_MAX_LO = 0.380,
-    DEACT_NO_RETURN_MIN_HI = 0.200,
+    DEACT_NO_RETURN_MAX_LO = 0.150,
+    DEACT_NO_RETURN_MIN_HI = 0.150,
     DEACT_NO_RETURN_SPD_LO = 60,
     DEACT_NO_RETURN_SPD_HI = 200,
 
@@ -310,6 +310,7 @@ local function getNoReturnTimeout(speed)
 end
 
 local function shouldDeactivate(t, hr, ball)
+    -- hard fails
     if t < S.teleportLockUntil then
         return true
     end
@@ -324,12 +325,22 @@ local function shouldDeactivate(t, hr, ball)
 
     local distance = (hr.Position - ball.Position).Magnitude
     local speed = getBallSpeed(ball)
-    local floor = getDeactFloor(speed)
 
+    -- floor: dentro do piso, não desativa (bola ainda na zona ativa)
+    local floor = getDeactFloor(speed)
     if distance <= floor then
+        -- mantém lastReturnAt fresco se a bola tá vindo (evita desativar cedo)
+        local ok, velocity = pcall(function() return ball.AssemblyLinearVelocity end)
+        if ok and typeof(velocity) == "Vector3" and velocity.Magnitude > 1 then
+            local toMe = hr.Position - ball.Position
+            if toMe.Magnitude > 0.001 and velocity:Dot(toMe.Unit) > 0 then
+                S.lastReturnAt = t
+            end
+        end
         return false
     end
 
+    -- além do piso: gate é o timeout de no-return
     return t - S.lastReturnAt > getNoReturnTimeout(speed)
 end
 
