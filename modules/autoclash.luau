@@ -23,9 +23,9 @@ local C = {
 
 	-- target return: era target → deixou de ser → voltou em janela curta = ativa
 	-- convive com return físico (fontes separadas, OR na ativação)
-	-- apertado: rejeita oscilação lenta, só pega return rápido
-	TARGET_RETURN_MAX_LO = 0.110, -- @ spd baixa
-	TARGET_RETURN_MIN_HI = 0.055, -- @ spd alta
+	-- apertado com folga: rejeita oscilação lenta, pega return rápido
+	TARGET_RETURN_MAX_LO = 0.140, -- @ spd baixa
+	TARGET_RETURN_MIN_HI = 0.070, -- @ spd alta
 	TARGET_RETURN_SPD_LO = 60,
 	TARGET_RETURN_SPD_HI = 200,
 
