@@ -10,6 +10,7 @@ local AutoParry
 
 local C = {
 	ACT_RAD_FACTOR = 1.40,
+	ACT_RETURN_RADIUS_FACTOR = 1.50,
 
 	DET_RAD_MIN = 10,
 	DET_RAD_MAX = 25,
@@ -21,15 +22,17 @@ local C = {
 	DET_RETURN_SPD_LO = 60,
 	DET_RETURN_SPD_HI = 200,
 
-	TARGET_RETURN_MAX_LO = 0.100,
-	TARGET_RETURN_MIN_HI = 0.050,
+	TARGET_RETURN_MAX_LO = 0.140,
+	TARGET_RETURN_MIN_HI = 0.070,
 	TARGET_RETURN_SPD_LO = 60,
 	TARGET_RETURN_SPD_HI = 200,
+	TARGET_RETURN_DOT_MIN = 0.05,
+	TARGET_RETURN_DIST_DELTA = 0.5,
 
 	DEACT_TARGET_SPD_LO = 60,
 	DEACT_TARGET_SPD_HI = 200,
-	DEACT_TIMEOUT_LO = 0.100,
-	DEACT_TIMEOUT_HI = 0.050,
+	DEACT_TIMEOUT_LO = 0.055,
+	DEACT_TIMEOUT_HI = 0.025,
 
 	ACTIVE_LOCK = 0.080,
 	INACTIVE_LOCK = 0.080,
@@ -51,8 +54,13 @@ local S = {
 	lastTarget = -999,
 	lastTargetAt = 0,
 	lastTimeWasTarget = 0,
+
 	wasMeTarget = false,
 	lostMeAt = 0,
+	targetReturnMinDist = 0,
+
+	activationSpeed = 0,
+	activationTargetWindow = 0,
 
 	teleportLockUntil = 0,
 }
@@ -138,7 +146,7 @@ local function resetDetector()
 	S.detMinDist = 0
 end
 
-local function activate(t)
+local function activate(t, ball)
 	if S.active then
 		return false
 	end
@@ -147,9 +155,21 @@ local function activate(t)
 		return false
 	end
 
+	local speed = getBallSpeed(ball)
+
 	S.active = true
 	S.activeAt = t
 	S.inactiveAt = 0
+
+	S.activationSpeed = speed
+	S.activationTargetWindow = lerpBySpeed(
+		speed,
+		C.TARGET_RETURN_SPD_LO,
+		C.TARGET_RETURN_SPD_HI,
+		C.TARGET_RETURN_MAX_LO,
+		C.TARGET_RETURN_MIN_HI
+	)
+
 	S.lastTimeWasTarget = t
 
 	resetDetector()
@@ -170,6 +190,9 @@ local function deactivate(t)
 	S.activeAt = 0
 	S.inactiveAt = t
 
+	S.activationSpeed = 0
+	S.activationTargetWindow = 0
+
 	resetDetector()
 
 	return true
@@ -179,6 +202,9 @@ local function forceDeactivate(t)
 	S.active = false
 	S.activeAt = 0
 	S.inactiveAt = t
+
+	S.activationSpeed = 0
+	S.activationTargetWindow = 0
 
 	resetDetector()
 
@@ -231,9 +257,11 @@ local function tickReturnDetector(t, hr, ball)
 	end
 
 	local radius = getDetectorRadius(speed)
+	local activationRadius = radius * C.ACT_RETURN_RADIUS_FACTOR
+
 	local coming = velocity:Dot(offset.Unit) > 0
 
-	if distance > radius * 1.2 then
+	if distance > activationRadius then
 		resetDetector()
 		return false
 	end
@@ -245,7 +273,7 @@ local function tickReturnDetector(t, hr, ball)
 	end
 
 	if S.detPhase == "IDLE" then
-		if distance <= radius and coming then
+		if distance <= activationRadius and coming then
 			S.detPhase = "INSIDE"
 			S.detEnterAt = t
 			S.detMinDist = distance
@@ -300,19 +328,71 @@ local function getTargetReturnWindow(speed)
 	)
 end
 
-local function tickTargetReturn(t, ball)
-	if not (S.wasMeTarget and isTargeted()) then
+local function tickTargetReturn(t, hr, ball)
+	if not (
+		S.wasMeTarget
+		and isTargeted()
+		and hr
+		and hr.Parent
+		and ball
+		and ball.Parent
+	) then
 		return false
 	end
 
-	local speed = getBallSpeed(ball)
-	local window = getTargetReturnWindow(speed)
+	local velocity = getBallVelocity(ball)
+
+	if not velocity then
+		return false
+	end
+
+	local speed = velocity.Magnitude
+
+	if speed <= 1 then
+		return false
+	end
+
+	local offset = hr.Position - ball.Position
+	local distance = offset.Magnitude
+
+	if distance <= 0.001 then
+		return false
+	end
+
+	local dot = velocity:Dot(offset.Unit) / speed
+
+	if dot < C.TARGET_RETURN_DOT_MIN then
+		return false
+	end
+
 	local elapsed = t - S.lostMeAt
+	local window = getTargetReturnWindow(speed)
+
+	S.targetReturnMinDist = math.min(
+		S.targetReturnMinDist,
+		distance
+	)
+
+	local approaching =
+		distance <= S.targetReturnMinDist + C.TARGET_RETURN_DIST_DELTA
+
+	if not approaching then
+		return false
+	end
+
+	if elapsed > window then
+		S.wasMeTarget = false
+		S.lostMeAt = 0
+		S.targetReturnMinDist = 0
+
+		return false
+	end
 
 	S.wasMeTarget = false
 	S.lostMeAt = 0
+	S.targetReturnMinDist = 0
 
-	return elapsed <= window
+	return true
 end
 
 -- ── activation ───────────────────────────────────────────────────────────────
@@ -330,7 +410,7 @@ local function shouldActivate(t, hr, ball)
 		return true
 	end
 
-	return tickTargetReturn(t, ball)
+	return tickTargetReturn(t, hr, ball)
 end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
@@ -359,17 +439,15 @@ local function shouldDeactivate(t, hr, ball)
 		return true
 	end
 
-	local speed = getBallSpeed(ball)
-	local timeout = getDeactivateTimeout(speed)
-	local sinceTarget = t - S.lastTimeWasTarget
-
-	if sinceTarget <= timeout then
-		return false
-	end
-
 	local velocity = getBallVelocity(ball)
 
-	if not velocity or speed <= 1 then
+	if not velocity then
+		return true
+	end
+
+	local speed = velocity.Magnitude
+
+	if speed <= 1 then
 		return true
 	end
 
@@ -380,7 +458,25 @@ local function shouldDeactivate(t, hr, ball)
 		return true
 	end
 
-	return velocity:Dot(offset.Unit) <= 0
+	local dot = velocity:Dot(offset.Unit) / speed
+	local timeout = getDeactivateTimeout(speed)
+
+	local sinceTarget = t - S.lastTimeWasTarget
+	local sinceActivation = t - S.activeAt
+
+	if sinceActivation < C.ACTIVE_LOCK then
+		return false
+	end
+
+	if sinceTarget <= timeout then
+		return false
+	end
+
+	if dot > 0 then
+		return false
+	end
+
+	return true
 end
 
 -- ── evaluate ─────────────────────────────────────────────────────────────────
@@ -424,7 +520,7 @@ local function evaluate(t, hr, ball, config)
 			deactivate(t)
 		end
 	elseif shouldActivate(t, hr, ball) then
-		activate(t)
+		activate(t, ball)
 	end
 end
 
@@ -456,6 +552,22 @@ local function onTarget(newTarget, t)
 	if wasMe and not isMe then
 		S.wasMeTarget = true
 		S.lostMeAt = t
+
+		local ball = getBall()
+		local hr = getMyHRP()
+
+		if ball and ball.Parent and hr and hr.Parent then
+			S.targetReturnMinDist =
+				(hr.Position - ball.Position).Magnitude
+		else
+			S.targetReturnMinDist = math.huge
+		end
+	end
+
+	if not isMe and not wasMe then
+		S.wasMeTarget = false
+		S.lostMeAt = 0
+		S.targetReturnMinDist = 0
 	end
 
 	local getState = AutoParry.getState
@@ -550,8 +662,13 @@ function AutoClash.resetState()
 	S.lastTarget = -999
 	S.lastTargetAt = 0
 	S.lastTimeWasTarget = 0
+
 	S.wasMeTarget = false
 	S.lostMeAt = 0
+	S.targetReturnMinDist = 0
+
+	S.activationSpeed = 0
+	S.activationTargetWindow = 0
 
 	S.teleportLockUntil = 0
 
