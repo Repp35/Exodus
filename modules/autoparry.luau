@@ -1,4 +1,5 @@
 --[[ auto parry ]]
+-- (corrigido: parryRad agora varia com speed e res de verdade)
 
 local AutoParry = {}
 local Probe, GameInfo, Utils
@@ -7,11 +8,16 @@ local Probe, GameInfo, Utils
 local P = {
     FIRE_LOCK = 0.080,
     FIRE_TIMEOUT = 2.0,
-    MIN_SPD = 7,
-    DEFLECT_R = 8.5,
-    RAD_FLOOR = 14,
+    MIN_SPD = 5,
+    DEFLECT_R = 8.5,        -- raio base
+    RAD_FLOOR = 14,         -- ainda usado como piso do clamp
+    RAD_CAP = 30,           -- teto do clamp
     PING_FLOOR = 0.030,
     PING_CAP = 0.150,
+
+    -- NOVO: crescimento do raio com a velocidade
+    RAD_PER_SPD = 0.05,     -- +0.05 studs por unidade de velocidade
+    RAD_SPD_REF = 200,      -- acima disso, satura
 
     RES_BASE = 0,
     RES_PER_PARRY = 0.225,
@@ -25,15 +31,13 @@ local P = {
 
 -- estado ap
 local AP = {
-    armed = false,        -- condições de parry bateram, esperando CD zerar
-    armedBall = nil,      -- ball ref usada no momento do arm (pra invalidação)
+    armed = false,
+    armedBall = nil,
     armedAt = 0,
     armedSig = nil,
     fired = false,
     firedAt = 0,
 }
-
-local _activeConns = {}
 
 -- estado res
 local RES = {
@@ -43,6 +47,8 @@ local RES = {
     lastHitboxAt = 0,
     lastStackAt = 0,
 }
+
+local _activeConns = {}
 
 local _teleportLockUntil = 0
 local _apBind = 0
@@ -114,15 +120,27 @@ local function isTargeted()
     return GameInfo.isTargeted(_lastTargetSeen)
 end
 
+-- NOVO: fórmula que de verdade varia com speed e res
 local function computeParryRadius(spd, t)
     spd = tonumber(spd) or 0
     t   = tonumber(t) or Utils.now()
+
     local pingOneWay = math.clamp(_smoothPing * 0.5, P.PING_FLOOR, P.PING_CAP)
     if (t - _pingOneWayStamp) > 0.25 then
         _pingOneWayCached = pingOneWay
         _pingOneWayStamp  = t
     end
-    local parryRad  = math.clamp(P.DEFLECT_R + P.RAD_FLOOR, 18, 30)
+
+    -- base + velocidade (saturada em RAD_SPD_REF) + res
+    local spdFactor = math.clamp(spd / P.RAD_SPD_REF, 0, 1)
+    local resBonus  = resRadiusBonus(t)
+
+    local parryRad = P.DEFLECT_R
+        + (P.RAD_FLOOR - P.DEFLECT_R) * spdFactor  -- 8.5 → 14 conforme speed sobe
+        + resBonus                                  -- +0.225 por stack de res
+
+    parryRad = math.clamp(parryRad, P.DEFLECT_R, P.RAD_CAP)
+
     local detectRad = parryRad + spd * _pingOneWayCached
     return parryRad, detectRad
 end
@@ -203,17 +221,14 @@ local function bindParry(character)
         _pingTimer = _pingTimer + dt
         if _pingTimer >= PING_SAMPLE then _pingTimer = 0; samplePing() end
 
-        -- fast path: armado, esperando CD zerar (sem timeout, só desarma se target mudar)
         if AP.armed then
             local curBall = GameInfo.getBall()
             local stillTargeted = GameInfo.isTargeted(_lastTargetSeen)
             local ballAlive = AP.armedBall and AP.armedBall.Parent ~= nil
             local sameBall = (curBall == AP.armedBall)
             if not (stillTargeted and ballAlive and sameBall) then
-                -- target mudou / bola sumiu / bola trocou → desarma
                 AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
             elseif getDeflectCD() <= 0 then
-                -- CD zerou: dispara instantaneamente
                 if AP.fired then
                     if (t - AP.firedAt) >= P.FIRE_TIMEOUT then AP.fired = false end
                 end
@@ -225,7 +240,6 @@ local function bindParry(character)
                 AP.armed, AP.armedBall, AP.armedAt, AP.armedSig = false, nil, 0, nil
                 return
             else
-                -- ainda em CD, mantém armado e espera o próximo frame
                 return
             end
         end
@@ -250,8 +264,7 @@ local function bindParry(character)
         end
         local triggerWindow = pingOneWay + 0.016
 
-        local parryRad  = math.clamp(P.DEFLECT_R + P.RAD_FLOOR, 18, 30)
-        local detectRad = parryRad + spd * pingOneWay
+        local parryRad, detectRad = computeParryRadius(spd, t)
 
         local hp = hrp.Position
         local dx, dy, dz = hp.X - bp.X, hp.Y - bp.Y, hp.Z - bp.Z
@@ -264,12 +277,11 @@ local function bindParry(character)
         if tImp < 0 then tImp = 0 end
         if tImp > triggerWindow then return end
 
-        -- cooldown gate: se tá em CD, ARMA em vez de descartar
         if getDeflectCD() > 0 then
             AP.armed = true
             AP.armedBall = ball
             AP.armedAt = t
-            AP.armedSig = true -- marcado; a checagem de validade usa armedBall
+            AP.armedSig = true
             return
         end
 
@@ -338,6 +350,12 @@ function AutoParry.getSync()              return getSync() end
 function AutoParry.isTargeted()           return isTargeted() end
 function AutoParry.computeParryRadius(spd, t)
     return computeParryRadius(spd, t)
+end
+
+-- NOVO: helper que AutoClash consome
+function AutoParry.getParryRadius(spd, t)
+    local parryRad, _detectRad = computeParryRadius(spd or 0, t)
+    return parryRad
 end
 
 if _G.ExodusModules then _G.ExodusModules.AutoParry = AutoParry end
