@@ -31,8 +31,8 @@ local C = {
 
 	DEACT_TARGET_SPD_LO = 60,
 	DEACT_TARGET_SPD_HI = 200,
-	DEACT_TIMEOUT_LO = 0.055,
-	DEACT_TIMEOUT_HI = 0.025,
+	DEACT_TIMEOUT_LO = 0.100,
+	DEACT_TIMEOUT_HI = 0.050,
 
 	ACTIVE_LOCK = 0.080,
 	INACTIVE_LOCK = 0.080,
@@ -58,9 +58,6 @@ local S = {
 	wasMeTarget = false,
 	lostMeAt = 0,
 	targetReturnMinDist = 0,
-
-	activationSpeed = 0,
-	activationTargetWindow = 0,
 
 	teleportLockUntil = 0,
 }
@@ -146,7 +143,7 @@ local function resetDetector()
 	S.detMinDist = 0
 end
 
-local function activate(t, ball)
+local function activate(t)
 	if S.active then
 		return false
 	end
@@ -155,21 +152,9 @@ local function activate(t, ball)
 		return false
 	end
 
-	local speed = getBallSpeed(ball)
-
 	S.active = true
 	S.activeAt = t
 	S.inactiveAt = 0
-
-	S.activationSpeed = speed
-	S.activationTargetWindow = lerpBySpeed(
-		speed,
-		C.TARGET_RETURN_SPD_LO,
-		C.TARGET_RETURN_SPD_HI,
-		C.TARGET_RETURN_MAX_LO,
-		C.TARGET_RETURN_MIN_HI
-	)
-
 	S.lastTimeWasTarget = t
 
 	resetDetector()
@@ -190,9 +175,6 @@ local function deactivate(t)
 	S.activeAt = 0
 	S.inactiveAt = t
 
-	S.activationSpeed = 0
-	S.activationTargetWindow = 0
-
 	resetDetector()
 
 	return true
@@ -202,9 +184,6 @@ local function forceDeactivate(t)
 	S.active = false
 	S.activeAt = 0
 	S.inactiveAt = t
-
-	S.activationSpeed = 0
-	S.activationTargetWindow = 0
 
 	resetDetector()
 
@@ -258,7 +237,6 @@ local function tickReturnDetector(t, hr, ball)
 
 	local radius = getDetectorRadius(speed)
 	local activationRadius = radius * C.ACT_RETURN_RADIUS_FACTOR
-
 	local coming = velocity:Dot(offset.Unit) > 0
 
 	if distance > activationRadius then
@@ -439,15 +417,17 @@ local function shouldDeactivate(t, hr, ball)
 		return true
 	end
 
-	local velocity = getBallVelocity(ball)
+	local speed = getBallSpeed(ball)
+	local timeout = getDeactivateTimeout(speed)
+	local sinceTarget = t - S.lastTimeWasTarget
 
-	if not velocity then
-		return true
+	if sinceTarget <= timeout then
+		return false
 	end
 
-	local speed = velocity.Magnitude
+	local velocity = getBallVelocity(ball)
 
-	if speed <= 1 then
+	if not velocity or speed <= 1 then
 		return true
 	end
 
@@ -458,25 +438,7 @@ local function shouldDeactivate(t, hr, ball)
 		return true
 	end
 
-	local dot = velocity:Dot(offset.Unit) / speed
-	local timeout = getDeactivateTimeout(speed)
-
-	local sinceTarget = t - S.lastTimeWasTarget
-	local sinceActivation = t - S.activeAt
-
-	if sinceActivation < C.ACTIVE_LOCK then
-		return false
-	end
-
-	if sinceTarget <= timeout then
-		return false
-	end
-
-	if dot > 0 then
-		return false
-	end
-
-	return true
+	return velocity:Dot(offset.Unit) <= 0
 end
 
 -- ── evaluate ─────────────────────────────────────────────────────────────────
@@ -520,7 +482,7 @@ local function evaluate(t, hr, ball, config)
 			deactivate(t)
 		end
 	elseif shouldActivate(t, hr, ball) then
-		activate(t, ball)
+		activate(t)
 	end
 end
 
@@ -666,9 +628,6 @@ function AutoClash.resetState()
 	S.wasMeTarget = false
 	S.lostMeAt = 0
 	S.targetReturnMinDist = 0
-
-	S.activationSpeed = 0
-	S.activationTargetWindow = 0
 
 	S.teleportLockUntil = 0
 
