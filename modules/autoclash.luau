@@ -28,8 +28,13 @@ local C = {
     TARGET_RETURN_SPD_LO = 60,
     TARGET_RETURN_SPD_HI = 200,
 
-    -- TODO: refazer lógica de desativação
-    -- (heurísticas target+tImp estavam anulando a ativação)
+    -- Desativação: tImp < 0 continuamente por X tempo (varia com speed)
+    -- tImp < 0 = bola já passou de mim, está se afastando
+    -- thresholds baseados na ativação (~190ms), com folga
+    DEACT_TIMP_SPD_LO = 60,
+    DEACT_TIMP_SPD_HI = 200,
+    DEACT_TIMP_T_LO   = 0.300,  -- 300ms em speed baixa
+    DEACT_TIMP_T_HI   = 0.150,  -- 150ms em speed alta
 
     TELEPORT_LOCK = 0.20,
 }
@@ -50,6 +55,9 @@ local S = {
     lastTargetAt = 0,
     wasMeTarget = false,
     lostMeAt = 0,
+
+    -- tImp < 0 continuamente desde este timestamp (0 = bola não está se afastando)
+    timpAwaySince = 0,
 
     teleportLockUntil = 0,
 }
@@ -139,6 +147,7 @@ local function activate(t)
     S.active = true
     S.activeAt = t
 
+    S.timpAwaySince = 0
     resetDetector()
 end
 
@@ -146,6 +155,7 @@ local function deactivate()
     S.active = false
     S.activeAt = 0
 
+    S.timpAwaySince = 0
     resetDetector()
 end
 
@@ -280,10 +290,43 @@ local function shouldActivate(t, hr, ball)
 end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
--- TODO: refazer lógica de desativação (heurísticas target+tImp estavam
--- anulando a ativação). Por ora, só hard fails (teleport, refs mortas).
+-- Critério: tImp < 0 continuamente por X ms (X varia com speed).
+-- tImp < 0 = bola já passou de mim, está se afastando.
+
+-- pega raio de parry real do AutoParry (com fallback conservador)
+local PARRY_RAD_FALLBACK = 14
+local function getParryRadius(speed, t)
+    local parryRadius = PARRY_RAD_FALLBACK
+    if AutoParry and type(AutoParry.getParryRadius) == "function" then
+        local v = AutoParry.getParryRadius(speed, t)
+        if type(v) == "number" and v > 0 then
+            parryRadius = v
+        end
+    end
+    return parryRadius
+end
+
+-- mesmo tImp do AutoParry: (dist - parryRad) / speed
+-- < 0 = bola passou, está se afastando
+local function computeTImp(hr, ball, speed, t)
+    local parryRad = getParryRadius(speed, t)
+    local dist = (hr.Position - ball.Position).Magnitude
+    return (dist - parryRad) / speed, parryRad
+end
+
+-- threshold ajustado por velocidade (rápido = desativa mais rápido)
+local function getDeactTimpT(speed)
+    return lerpBySpeed(
+        speed,
+        C.DEACT_TIMP_SPD_LO,
+        C.DEACT_TIMP_SPD_HI,
+        C.DEACT_TIMP_T_LO,
+        C.DEACT_TIMP_T_HI
+    )
+end
 
 local function shouldDeactivate(t, hr, ball)
+    -- hard fails (sempre desativa)
     if t < S.teleportLockUntil then
         return true
     end
@@ -294,6 +337,31 @@ local function shouldDeactivate(t, hr, ball)
 
     if not ball or not ball.Parent then
         return true
+    end
+
+    local speed = getBallSpeed(ball)
+    if speed <= 1 then
+        return true
+    end
+
+    -- calcula tImp
+    local tImp, _parryRad = computeTImp(hr, ball, speed, t)
+
+    -- Timer: bola se afastando (tImp < 0) continuamente
+    if tImp < 0 then
+        if S.timpAwaySince == 0 then
+            S.timpAwaySince = t
+        end
+    else
+        S.timpAwaySince = 0
+    end
+
+    -- Desativa só se ficou se afastando pelo tempo mínimo
+    if S.timpAwaySince > 0 then
+        local timpAwayFor = t - S.timpAwaySince
+        if timpAwayFor >= getDeactTimpT(speed) then
+            return true
+        end
     end
 
     return false
@@ -494,6 +562,8 @@ function AutoClash.resetState()
     S.lastTargetAt = 0
     S.wasMeTarget = false
     S.lostMeAt = 0
+
+    S.timpAwaySince = 0
 
     S.teleportLockUntil = 0
 
