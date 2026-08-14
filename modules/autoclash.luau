@@ -368,12 +368,35 @@ local function shouldDeactivate(t, hr, ball)
 		return true
 	end
 
-	-- ausência de target: t - lastTimeWasTarget > timeout(velocidade)
+	-- GATE: target demorou mais que o timeout pra voltar (= não é return)
+	-- em clash, o target volta em ms → sinceTarget < timeout → bloqueado aqui
 	local speed = getBallSpeed(ball)
 	local timeout = getDeactivateTimeout(speed)
 	local sinceTarget = t - S.lastTimeWasTarget
 
-	return sinceTarget > timeout
+	if sinceTarget <= timeout then
+		return false
+	end
+
+	-- CONFIRMAÇÃO: passou do gate, agora checa se a bola foi embora (dot ≤ 0)
+	-- dot > 0 = bola ainda voltando / vindo → segura mais um pouco
+	-- dot ≤ 0 = bola já tá se afastando → desativa
+	local velocity = getBallVelocity(ball)
+	if not velocity or speed <= 1 then
+		-- sem velocidade válida: conservador, desativa
+		return true
+	end
+
+	local offset = hr.Position - ball.Position
+	local distance = offset.Magnitude
+
+	if distance <= 0.001 then
+		return true
+	end
+
+	local movingAway = velocity:Dot(offset.Unit) <= 0
+
+	return movingAway
 end
 
 -- ── evaluate ─────────────────────────────────────────────────────────────────
