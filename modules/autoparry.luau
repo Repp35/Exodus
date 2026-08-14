@@ -7,7 +7,7 @@ local Probe, GameInfo, Utils
 local P = {
     FIRE_LOCK = 0.080,
     FIRE_TIMEOUT = 2.0,
-    MIN_SPD = 5,
+    MIN_SPD = 7,
     DEFLECT_R = 8.5,
     RAD_FLOOR = 14,
     PING_FLOOR = 0.030,
