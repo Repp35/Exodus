@@ -441,7 +441,7 @@ local function onTarget(newTarget, t)
     local window = getTargetReturnWindow(speed)
     local elapsed = t - S.lostMeAt
 
-    if elapsed <= window and not S.active then
+    if elapsed <= window then
         activate(t)
     end
 
