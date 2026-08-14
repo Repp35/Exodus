@@ -18,7 +18,9 @@ local C = {
     DET_RAD_SPD_REF     = 120,   -- spd de referência pro scaling
     DET_RAD_SLACK       = 1.2,   -- folga do EMA (1.2x do raio)
     DET_DOT_THRESH      = 0.05,  -- threshold direto (sem EMA = mais sensível)
-    DET_RETURN_FACTOR   = 1.5,   -- janela = entryTime * factor
+    DET_RETURN_FACTOR   = 1.5,   -- janela = entryTime * factor (v22 logic)
+    -- ↑ factor: quanto maior, mais permissivo o return
+    -- 1.5 = conservador, 2.0 = bem permissivo
     DET_TIMEOUT         = 0.8,   -- reset IDLE se não voltar a tempo
 
     -- target return (eu era → deixei de ser → voltei a ser)
@@ -312,6 +314,7 @@ local function onTarget(newTarget, t)
     end
 
     -- target return: voltei a ser target depois de ter perdido
+    --[[ TEMPORARIAMENTE DESATIVADO PRA TESTE
     if isMe and not wasMe and S.wasMeTarget then
         -- janela adaptativa por velocidade da bola
         local spd = 0
@@ -330,6 +333,7 @@ local function onTarget(newTarget, t)
         S.wasMeTarget = false
         S.lostMeAt    = 0
     end
+    ]]
 end
 
 local function onTeleport()
