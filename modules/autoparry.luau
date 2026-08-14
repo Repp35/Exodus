@@ -27,6 +27,15 @@ local C = {
     TARGET_RETURN_SPD_LO = 60,
     TARGET_RETURN_SPD_HI = 200,
 
+    -- deactivation por tImp com histerese
+    DEACT_TIMP_HIGH = 0.25,   -- desativa quando tImp > isso
+    DEACT_TIMP_LOW  = 0.15,   -- nunca volta abaixo disso sem novo return
+    DEACT_TIMP_FRAMES = 2,    -- frames consecutivos pra confirmar
+    DEACT_GONE_DIST = 65,     -- bola sumida
+
+    -- target loss
+    TARGET_LOSS_TIMEOUT = 0.20,
+
     TELEPORT_LOCK = 0.20,
 }
 
@@ -46,6 +55,9 @@ local S = {
     lastTargetAt = 0,
     wasMeTarget = false,
     lostMeAt = 0,
+
+    -- deact tracking
+    deactFrames = 0,
 
     teleportLockUntil = 0,
 }
@@ -269,17 +281,65 @@ end
 
 -- ── deactivation ─────────────────────────────────────────────────────────────
 
+local function computeTImp(hr, ball)
+    if not (hr and hr.Parent and ball and ball.Parent) then
+        return math.huge
+    end
+
+    local offset = hr.Position - ball.Position
+    local dist = offset.Magnitude
+
+    local velocity = getBallVelocity(ball)
+    if not velocity or velocity.Magnitude < 1 then
+        return math.huge
+    end
+
+    -- tImp = distância / velocidade na sua direção
+    local speed = velocity.Magnitude
+    local dotProduct = velocity:Dot(offset.Unit)
+
+    -- se bola não está vindo em sua direção, tImp é infinito
+    if dotProduct <= 0 then
+        return math.huge
+    end
+
+    return dist / dotProduct
+end
+
 local function shouldDeactivate(t, hr, ball)
+    -- hard: teleporte
     if t < S.teleportLockUntil then
         return true
     end
 
-    if not hr or not hr.Parent then
+    -- hard: bola ou player não existe
+    if not (hr and hr.Parent and ball and ball.Parent) then
         return true
     end
 
-    if not ball or not ball.Parent then
+    -- hard: bola sumiu
+    local offset = hr.Position - ball.Position
+    if offset.Magnitude > C.DEACT_GONE_DIST then
+        S.deactFrames = 0
         return true
+    end
+
+    -- hard: perdeu target há muito tempo
+    if not isTargeted() and (t - S.lastTargetAt) > C.TARGET_LOSS_TIMEOUT then
+        S.deactFrames = 0
+        return true
+    end
+
+    -- soft: tImp muito alto com histerese
+    local timp = computeTImp(hr, ball)
+
+    if timp > C.DEACT_TIMP_HIGH then
+        S.deactFrames = S.deactFrames + 1
+        if S.deactFrames >= C.DEACT_TIMP_FRAMES then
+            return true
+        end
+    else
+        S.deactFrames = 0
     end
 
     return false
@@ -473,6 +533,8 @@ function AutoClash.resetState()
     S.lastTargetAt = 0
     S.wasMeTarget = false
     S.lostMeAt = 0
+
+    S.deactFrames = 0
 
     S.teleportLockUntil = 0
 
