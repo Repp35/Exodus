@@ -29,10 +29,10 @@ local C = {
     TARGET_RETURN_SPD_HI = 200,
 
     -- NOVO: desativação por histerese target + tImp
-    -- target precisa estar fora por 200ms (espelho da ativação)
-    -- E a bola precisa estar se afastando (tImp < 0) por 50ms
-    DEACT_TARGET_LOST_T = 0.200,
-    DEACT_TIMP_AWAY_T   = 0.050,
+    -- target precisa estar fora por 250ms (espelho + folga da ativação)
+    -- E a bola precisa estar se afastando (tImp < 0) por 100ms contínuos
+    DEACT_TARGET_LOST_T = 0.250,
+    DEACT_TIMP_AWAY_T   = 0.100,
 
     -- fallback se AutoParry não responder
     PARRY_RAD_FALLBACK = 14,
@@ -342,8 +342,15 @@ local function shouldDeactivate(t, hr, ball)
         return true
     end
 
-    local tImp, _parryRad = computeTImp(hr, ball, speed)
-    local timpIsAway = tImp <= 0
+    local tImp, parryRad = computeTImp(hr, ball, speed)
+    local distance = (hr.Position - ball.Position).Magnitude
+
+    -- "se afastando de verdade" = bola passou do parry radius E está
+    -- a uma distância significativamente maior (não é só uma oscilação
+    -- na borda). Evita desativar no meio do clash quando a bola vai
+    -- e volta do rebatedor.
+    local farFromParry = distance > parryRad * 1.5
+    local timpIsAway = tImp < 0 and farFromParry
 
     -- ── Timer 1: target perdido ───────────────────────────────────────────
     if isTargeted() then
@@ -354,8 +361,9 @@ local function shouldDeactivate(t, hr, ball)
         end
     end
 
-    -- ── Timer 2: bola se afastando (tImp <= 0) ───────────────────────────
-    if timpIsAway then
+    -- ── Timer 2: bola se afastando (tImp < 0) CONSISTENTEMENTE ──────────
+    -- reseta se tImp >= 0 em qualquer frame (bola voltou a vir em minha direção)
+    if tImp < 0 then
         if S.timpAwaySince == 0 then
             S.timpAwaySince = t
         end
@@ -363,7 +371,7 @@ local function shouldDeactivate(t, hr, ball)
         S.timpAwaySince = 0
     end
 
-    -- ── Decisão: ambos precisam estar "velhos" ───────────────────────────
+    -- ── Decisão: ambos precisam estar "velhos" ao mesmo tempo ───────────
     local targetLostFor = (S.targetLostAt > 0) and (t - S.targetLostAt) or 0
     local timpAwayFor   = (S.timpAwaySince > 0) and (t - S.timpAwaySince) or 0
 
