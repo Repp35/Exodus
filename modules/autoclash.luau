@@ -27,15 +27,13 @@ local C = {
     TARGET_RETURN_SPD_LO = 60,
     TARGET_RETURN_SPD_HI = 200,
 
-    -- deactivation por tImp com histerese
-    DEACT_TIMP_HIGH = 0.25,   -- desativa quando tImp > isso
-    DEACT_TIMP_FRAMES = 2,    -- frames consecutivos pra confirmar
-    DEACT_GONE_DIST = 65,     -- bola sumida
+    DEACT_TIMP_HIGH = 0.20,
+    DEACT_TIMP_CONFIRM = 0.050,
 
-    -- target loss
-    -- lockout/histerese temporal
-    ACTIVE_LOCK  = 0.080,   -- tempo mínimo ativo antes de poder desativar
-    INACTIVE_LOCK = 0.080,  -- tempo mínimo inativo antes de poder ativar
+    ACTIVE_LOCK = 0.080,
+    INACTIVE_LOCK = 0.080,
+
+    TELEPORT_LOCK = 0.20,
 }
 
 -- ── state ────────────────────────────────────────────────────────────────────
@@ -56,8 +54,7 @@ local S = {
     wasMeTarget = false,
     lostMeAt = 0,
 
-    -- deact tracking
-    deactFrames = 0,
+    deactSince = 0,
 
     teleportLockUntil = 0,
 }
@@ -109,7 +106,43 @@ local function getBallSpeed(ball)
     return velocity and velocity.Magnitude or 0
 end
 
-local function lerpBySpeed(speed, speedLow, speedHigh, valueLow, valueHigh)
+local function getTImp()
+    local getter = AutoParry.getTImp
+
+    if type(getter) == "function" then
+        local ok, value = pcall(getter)
+
+        if ok and type(value) == "number" then
+            return value
+        end
+    end
+
+    local getState = AutoParry.getState
+
+    if type(getState) == "function" then
+        local ok, state = pcall(getState)
+
+        if ok and type(state) == "table" then
+            if type(state.tImp) == "number" then
+                return state.tImp
+            end
+
+            if type(state.timp) == "number" then
+                return state.timp
+            end
+        end
+    end
+
+    return nil
+end
+
+local function lerpBySpeed(
+    speed,
+    speedLow,
+    speedHigh,
+    valueLow,
+    valueHigh
+)
     if speedHigh <= speedLow then
         return valueLow
     end
@@ -143,20 +176,57 @@ local function resetDetector()
     S.detMinDist = 0
 end
 
+local function resetDeactivation()
+    S.deactSince = 0
+end
+
 local function activate(t)
+    if S.active then
+        return false
+    end
+
+    if t - S.inactiveAt < C.INACTIVE_LOCK then
+        return false
+    end
+
     S.active = true
     S.activeAt = t
     S.inactiveAt = 0
-    S.deactFrames = 0
+
+    resetDeactivation()
     resetDetector()
+
+    return true
 end
 
 local function deactivate(t)
+    if not S.active then
+        return false
+    end
+
+    if t - S.activeAt < C.ACTIVE_LOCK then
+        return false
+    end
+
     S.active = false
     S.activeAt = 0
     S.inactiveAt = t
-    S.deactFrames = 0
+
+    resetDeactivation()
     resetDetector()
+
+    return true
+end
+
+local function forceDeactivate(t)
+    S.active = false
+    S.activeAt = 0
+    S.inactiveAt = t
+
+    resetDeactivation()
+    resetDetector()
+
+    return true
 end
 
 -- ── return detector ──────────────────────────────────────────────────────────
@@ -283,17 +353,39 @@ end
 -- ── deactivation ─────────────────────────────────────────────────────────────
 
 local function shouldDeactivate(t, hr, ball)
-    -- panic: teleporte
     if t < S.teleportLockUntil then
+        resetDeactivation()
         return true
     end
 
-    -- panic: bola ou player não existe
-    if not (hr and hr.Parent and ball and ball.Parent) then
+    if not (
+        hr
+        and hr.Parent
+        and ball
+        and ball.Parent
+    ) then
+        resetDeactivation()
         return true
     end
 
-    return false
+    local timp = getTImp()
+
+    if type(timp) ~= "number" then
+        resetDeactivation()
+        return false
+    end
+
+    if timp <= C.DEACT_TIMP_HIGH then
+        resetDeactivation()
+        return false
+    end
+
+    if S.deactSince == 0 then
+        S.deactSince = t
+        return false
+    end
+
+    return t - S.deactSince >= C.DEACT_TIMP_CONFIRM
 end
 
 -- ── evaluate ─────────────────────────────────────────────────────────────────
@@ -306,37 +398,43 @@ local function evaluate(t, hr, ball, config)
 
     if not enabled then
         S.enabled = false
-        deactivate(now())
+        forceDeactivate(t)
         return
     end
 
     if GameInfo.isGrace() then
-        deactivate(now())
+        forceDeactivate(t)
         return
     end
 
     S.enabled = true
 
     if not hr or not hr.Parent then
-        deactivate(now())
+        forceDeactivate(t)
         return
     end
 
     if not ball or not ball.Parent then
-        deactivate(now())
+        forceDeactivate(t)
         return
     end
 
     if t < S.teleportLockUntil then
-        deactivate(now())
+        forceDeactivate(t)
         return
     end
 
     if S.active then
-        if (t - S.activeAt) >= C.ACTIVE_LOCK and shouldDeactivate(t, hr, ball) then
-            deactivate(t)
+        if t - S.activeAt >= C.ACTIVE_LOCK then
+            if shouldDeactivate(t, hr, ball) then
+                deactivate(t)
+            end
         end
-    elseif (t - S.inactiveAt) >= C.INACTIVE_LOCK then
+
+        return
+    end
+
+    if t - S.inactiveAt >= C.INACTIVE_LOCK then
         if shouldActivate(t, hr, ball) then
             activate(t)
         end
@@ -408,8 +506,10 @@ local function onTarget(newTarget, t)
 end
 
 local function onTeleport()
-    S.teleportLockUntil = now() + C.TELEPORT_LOCK
-    deactivate(now())
+    local t = now()
+
+    S.teleportLockUntil = t + C.TELEPORT_LOCK
+    forceDeactivate(t)
 end
 
 -- ── public ───────────────────────────────────────────────────────────────────
@@ -488,7 +588,7 @@ function AutoClash.resetState()
     S.wasMeTarget = false
     S.lostMeAt = 0
 
-    S.deactFrames = 0
+    S.deactSince = 0
 
     S.teleportLockUntil = 0
 
@@ -496,7 +596,7 @@ function AutoClash.resetState()
 end
 
 function AutoClash.forceClear()
-    deactivate(now())
+    forceDeactivate(now())
 end
 
 if _G.ExodusModules then
