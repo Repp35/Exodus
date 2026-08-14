@@ -84,10 +84,23 @@ local function getBall()
 end
 
 local function isTargeted()
-    if not AutoParry or type(AutoParry.isTargeted) ~= "function" then
+    if not AutoParry then
         return false
     end
-    return AutoParry.isTargeted()
+
+    local getState = AutoParry.getState
+
+    if type(getState) ~= "function" then
+        return false
+    end
+
+    local ok, state = pcall(getState)
+
+    if not ok or type(state) ~= "table" then
+        return false
+    end
+
+    return state.armed == true
 end
 
 local function getBallVelocity(ball)
@@ -268,6 +281,10 @@ local function shouldActivate(t, hr, ball)
     end
 
     if not ball or not ball.Parent then
+        return false
+    end
+
+    if not AutoParry then
         return false
     end
 
