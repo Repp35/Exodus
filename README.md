@@ -1,2 +1,3 @@
-# Exodus
-um novo recomeço.
+# Lá vem o Skiddie
+
+> Esse hub não recebe mais atualizações.
